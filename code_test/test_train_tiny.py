@@ -250,6 +250,75 @@ def test_loss_and_perplexity_decrease(tmpdir: str) -> None:
     )
 
 
+def test_time_limit_stops_saves_and_uploads(tmpdir: str) -> None:
+    import huggingface_hub
+
+    cfg = dict(TRAIN_CFG)
+    cfg.update(
+        {
+            "checkpoint_dir": str(Path(tmpdir) / "checkpoints"),
+            "out_dir": str(Path(tmpdir) / "out"),
+            "max_steps": 100,
+            "max_hours": 1e-9,
+            "log_interval": 1,
+            "progress": False,
+        }
+    )
+    hf_cfg = {
+        "repo_id": "someone/minillm",
+        "token": "test-token",
+        "filename": "minillm_latest.pt",
+        "out_dir": "out",
+        "private": True,
+    }
+
+    calls: dict = {}
+
+    class FakeApi:
+        def __init__(self, token=None):
+            calls["token"] = token
+
+        def create_repo(self, **kwargs):
+            calls["create_repo"] = kwargs
+
+        def upload_file(self, **kwargs):
+            calls["upload_file"] = kwargs
+
+        def upload_folder(self, **kwargs):
+            calls["upload_folder"] = kwargs
+
+    device, _ = select_device(cfg)
+    model = GPT(MODEL_CFG)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=cfg["learning_rate"])
+    trainer = Trainer(
+        model=model,
+        optimizer=optimizer,
+        device=device,
+        model_cfg=MODEL_CFG,
+        train_cfg=cfg,
+        hf_cfg=hf_cfg,
+    )
+
+    original = huggingface_hub.HfApi
+    huggingface_hub.HfApi = FakeApi
+    try:
+        trainer.train(make_batches(num_steps=100, seed=13))
+    finally:
+        huggingface_hub.HfApi = original
+
+    assert trainer.step == 1, trainer.step
+    assert trainer.train_start_time is not None
+    assert trainer.max_train_seconds == 1e-9 * 3600
+    assert trainer.checkpoint_path.exists()
+    assert len(trainer.history) == 1
+    assert (trainer.out_dir / "metrics.json").exists()
+    assert "upload_file" in calls, calls
+    assert "upload_folder" in calls, calls
+    assert calls["upload_file"]["path_in_repo"] == "minillm_latest.pt"
+    assert calls["upload_folder"]["path_in_repo"] == "out"
+    print("time limit stopped training and saved/uploaded checkpoint")
+
+
 def test_lr_schedule() -> None:
     assert abs(lr_for_step(0, TRAIN_CFG) - 1e-3) < 1e-12
     assert abs(lr_for_step(1, TRAIN_CFG) - 1e-3) < 1e-12
@@ -418,6 +487,8 @@ def main() -> None:
         test_grad_accumulation(tmpdir)
     with tempfile.TemporaryDirectory() as tmpdir:
         test_loss_and_perplexity_decrease(tmpdir)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        test_time_limit_stops_saves_and_uploads(tmpdir)
     test_lr_schedule()
     test_env_file()
     test_hf_settings_warnings()

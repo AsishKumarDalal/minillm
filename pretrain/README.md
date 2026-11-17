@@ -85,6 +85,17 @@ Force CPU and a short run:
 .venv/bin/python -m pretrain.train --device cpu --max-steps 10
 ```
 
+Stop after 6 or 12 hours of wall-clock training. The final checkpoint and
+plots are still saved/uploaded:
+
+```bash
+.venv/bin/python -m pretrain.train --hours 6
+.venv/bin/python -m pretrain.train --max-hours 12
+```
+
+`--hours` is an alias for `--max-hours`. You can also set `max_hours: 6` in
+`configs/pretrain.yaml`.
+
 Disable all HuggingFace download/upload:
 
 ```bash
@@ -128,8 +139,8 @@ main(["--device", "cuda", "--max-steps", "100"])
 
 ## Checkpoints and resume
 
-Every `checkpoint_interval_minutes` (default **60**), plus at normal exit and
-on `Ctrl+C`, the script:
+Every `checkpoint_interval_minutes` (default **60**), plus at normal exit,
+on `Ctrl+C`, and when the `--hours` time limit is reached, the script:
 
 1. Saves `checkpoints/minillm_latest.pt` atomically.
 2. Writes the local `out/` folder:

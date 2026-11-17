@@ -9,7 +9,9 @@ Features
 * Automatic mixed precision (bf16/fp16) on CUDA.
 * TQDM progress bar via ``tqdm.auto`` so it works in notebooks and terminals.
 * Saves a local checkpoint and (optionally) uploads it to HuggingFace Hub
-  every ``checkpoint_interval_minutes`` (default: 60).
+  every ``checkpoint_interval_minutes`` (default: 60), plus at exit/Ctrl+C.
+* Optional wall-clock limit via ``--max-hours 6`` (or ``max_hours`` in the
+  config): training stops after that many hours and still saves/uploads.
 * Writes ``out/metrics.json`` and token-vs-loss / token-vs-perplexity plots
   at the same interval, then uploads them to the HF repo's ``out/`` folder.
 * On startup, downloads ``minillm_latest.pt`` from the configured HF repo
@@ -36,6 +38,9 @@ Usage
 
     # Disable HF upload/resume
     .venv/bin/python -m pretrain.train --no-hf
+
+    # Stop after 12 hours and save/upload the final checkpoint
+    .venv/bin/python -m pretrain.train --hours 12
 """
 
 from __future__ import annotations
@@ -446,6 +451,8 @@ class Trainer:
         self.last_loss: Optional[float] = None
         self.last_lr: Optional[float] = None
         self.last_metric_step = 0
+        self.train_start_time: Optional[float] = None
+        self.max_train_seconds: Optional[float] = None
 
         self.amp_dtype = choose_amp_dtype(device, train_cfg)
         self.use_amp = self.amp_dtype is not None
@@ -908,6 +915,21 @@ class Trainer:
         grad_clip = float(cfg.get("grad_clip", 1.0))
         show_progress = bool(cfg.get("progress", True))
 
+        max_hours = cfg.get("max_hours")
+        if max_hours is not None:
+            max_hours = float(max_hours)
+            if max_hours <= 0:
+                raise ValueError("max_hours must be > 0")
+            self.max_train_seconds = max_hours * 3600.0
+        else:
+            self.max_train_seconds = None
+        self.train_start_time = time.monotonic()
+        if self.max_train_seconds is not None:
+            logging.info(
+                "Time limit: %.2f h; training will stop and save automatically.",
+                max_hours,
+            )
+
         batches = iter(batches)
         self.model.train()
         self.optimizer.zero_grad(set_to_none=True)
@@ -996,13 +1018,21 @@ class Trainer:
                 )
                 # Update the bar every step so tokens_seen and loss visibly
                 # move; only record/log metrics at log_interval.
-                pbar.set_postfix(
-                    loss=f"{loss_value:.4f}",
-                    ppl=f"{ppl:,.1f}",
-                    tokens=f"{self.tokens_seen:,}",
-                    lr=f"{lr:.2e}",
-                    tok_s=f"{tok_s:,.1f}",
-                )
+                postfix = {
+                    "loss": f"{loss_value:.4f}",
+                    "ppl": f"{ppl:,.1f}",
+                    "tokens": f"{self.tokens_seen:,}",
+                    "lr": f"{lr:.2e}",
+                    "tok_s": f"{tok_s:,.1f}",
+                }
+                if self.max_train_seconds is not None:
+                    remaining = max(
+                        0.0,
+                        self.max_train_seconds
+                        - (now - self.train_start_time),
+                    )
+                    postfix["remaining_h"] = f"{remaining / 3600:.2f}"
+                pbar.set_postfix(postfix)
                 if self.step == 1 or self.step % log_interval == 0:
                     self._record_metric(loss_value, lr)
                     logging.info(
@@ -1018,14 +1048,28 @@ class Trainer:
                     last_log_time = now
                     last_log_tokens = self.tokens_seen
 
+                time_up = (
+                    self.max_train_seconds is not None
+                    and (now - self.train_start_time) >= self.max_train_seconds
+                )
+
                 if (
-                    self.interval_seconds > 0
+                    not time_up
+                    and self.interval_seconds > 0
                     and (now - self.last_checkpoint_time) >= self.interval_seconds
                 ):
                     self.save_checkpoint()
 
                 if data_exhausted:
                     logging.info("Data stream exhausted at step %d.", self.step)
+                    break
+
+                if time_up:
+                    logging.info(
+                        "Reached --max-hours time limit at step %d; "
+                        "stopping and saving checkpoint.",
+                        self.step,
+                    )
                     break
 
                 if max_steps is not None and self.step >= max_steps:
@@ -1165,6 +1209,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=DEFAULT_MODEL_CONFIG,
     )
     parser.add_argument("--max-steps", type=int, default=None)
+    parser.add_argument(
+        "--max-hours",
+        "--hours",
+        type=float,
+        default=None,
+        dest="max_hours",
+        help="Stop after this many wall-clock hours (e.g. 6 or 12). "
+             "The final checkpoint is still saved/uploaded.",
+    )
     parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument("--device", type=str, default=None)
     parser.add_argument("--num-gpus", type=int, default=None)
@@ -1186,6 +1239,8 @@ def main(argv: Optional[list[str]] = None) -> None:
 
     if args.max_steps is not None:
         pretrain_cfg["max_steps"] = args.max_steps
+    if args.max_hours is not None:
+        pretrain_cfg["max_hours"] = args.max_hours
     if args.batch_size is not None:
         pretrain_cfg["batch_size"] = args.batch_size
     if args.device is not None:

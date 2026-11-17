@@ -9,6 +9,8 @@ training plots every hour, and syncs them to HuggingFace Hub.
 ```bash
 python3 -m pip install -r requirements.txt
 python -m pretrain.train
+# or stop after 12 hours and upload the final checkpoint:
+python -m pretrain.train --hours 12
 ```
 
 In Kaggle, follow the detailed [pretraining runbook](runbook/pretrain.md).

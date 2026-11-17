@@ -145,6 +145,22 @@ Short run with HF sync enabled:
 main(["--device", "cuda", "--max-steps", "100", "--batch-size", "8"])
 ```
 
+Stop after 6 hours, then save/upload:
+
+```python
+main(["--hours", "6"])
+```
+
+`--hours` is an alias for `--max-hours`. You can also set this in
+`configs/pretrain.yaml`:
+
+```yaml
+max_hours: 6
+```
+
+The stop is checked after each optimizer step. When reached, training exits
+cleanly and the final checkpoint + `out/` files are saved and uploaded.
+
 ### What you should see
 
 ```text
@@ -206,8 +222,9 @@ out/training_curves.png
 ```
 
 Checkpoints and plots are written/uploaded every 60 minutes, at normal exit,
-and on a single notebook Interrupt. If your Kaggle session often dies before
-one hour, change `checkpoint_interval_minutes` to 10.
+on a single notebook Interrupt, and when the `max_hours` time limit is
+reached. If your Kaggle session often dies before one hour, change
+`checkpoint_interval_minutes` to 10.
 
 ---
 
@@ -257,7 +274,8 @@ Leave `vocab_size: 50257` and `tie_weights: true`.
 | `amp_dtype` | `auto` | `auto`, `bf16`, `fp16`, `fp32`. Kaggle T4 usually uses `fp16`. |
 | `batch_size` | `8` | Sequences per micro-batch. Lower it if you get CUDA OOM. |
 | `grad_accum_steps` | `1` | Micro-batches per optimizer step. Raise it to simulate a larger batch. |
-| `max_steps` | `null` | `null` trains until interrupted. Set an integer for a fixed run. |
+| `max_steps` | `null` | `null` trains until interrupted, time limit, or data exhausted. Set an integer for a fixed step count. |
+| `max_hours` | `null` | `null` = no time limit. Set `6` or `12` to stop after that many wall-clock hours and save/upload the final checkpoint. CLI: `--hours 6`. |
 | `grad_clip` | `1.0` | Gradient clipping. Leave as is. |
 | `progress` | `true` | Uses `tqdm.auto` for notebook-friendly bars. |
 
@@ -311,6 +329,8 @@ To disable HF entirely for a run, pass `--no-hf` rather than editing the file.
 | Goal | Change |
 | --- | --- |
 | Fast smoke run | `max_steps: 20`, `batch_size: 2`, `data.max_docs: 5` |
+| Stop after 6 hours | `max_hours: 6` or CLI `main(["--hours", "6"])` |
+| Stop after 12 hours | `max_hours: 12` or CLI `main(["--hours", "12"])` |
 | Smaller model | `emb_dim: 256`, `n_heads: 4`, `n_layers: 4` (keep `vocab_size: 50257`) |
 | Save more often | `checkpoint_interval_minutes: 10` |
 | Denser plots | `log_interval: 1` or `2` |

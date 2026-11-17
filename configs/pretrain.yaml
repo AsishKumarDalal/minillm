@@ -14,7 +14,8 @@ amp_dtype: auto        # auto | bf16 | fp16 | fp32
 
 batch_size: 8
 grad_accum_steps: 1
-max_steps: null        # null = train until interrupted / data exhausted
+max_steps: null        # null = train until interrupted / time limit / data exhausted
+max_hours: null        # e.g. 6 or 12; stop after N wall-clock hours and upload
 learning_rate: 3.0e-4
 min_lr: 3.0e-5
 warmup_steps: 200

@@ -47,6 +47,7 @@ This checks:
 - gradient accumulation
 - linear warmup + cosine LR schedule
 - local checkpoint save/resume (model, optimizer, step, tokens)
+- wall-clock time limit stops training and saves/uploads the final checkpoint
 - metrics history restore and loss/perplexity decreasing as tokens increase
 - local `out/metrics.json` plus loss, perplexity, and combined plots
 - `.env` parsing

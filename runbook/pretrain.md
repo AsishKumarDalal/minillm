@@ -388,6 +388,7 @@ is unchanged.
 | `sequence length ... exceeds context_length` | Ensure `data.block_size <= model.context_length`. |
 | Checkpoint config mismatch | You changed `configs/model.yaml`; start fresh or restore the old architecture. |
 | First batch is slow | Normal; OpenWebText streaming fetches a shard. |
+| `IterableDataset.shuffle() got an unexpected keyword 'max_buffer_input_shards'` | Pull the latest code; the data loader now falls back for older `datasets` versions used by Kaggle. |
 | Only local files, no HF files | Token missing/invalid, or `--no-hf` was used. |
 
 ---

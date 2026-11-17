@@ -20,6 +20,7 @@ if str(ROOT) not in sys.path:
 
 from pretrain.data import (  # noqa: E402
     OpenWebTextTokenStream,
+    _shuffle_streaming_dataset,
     get_encoder,
     iter_token_blocks,
 )
@@ -105,12 +106,47 @@ def test_bad_eot() -> None:
     raise AssertionError("out-of-range EOT token should have raised ValueError")
 
 
+def test_shuffle_compatibility() -> None:
+    class NewDataset:
+        def shuffle(self, **kwargs):
+            self.kwargs = kwargs
+            return self
+
+    new_ds = NewDataset()
+    assert _shuffle_streaming_dataset(new_ds, 10, seed=3) is new_ds
+    assert new_ds.kwargs["buffer_size"] == 10
+    assert new_ds.kwargs["seed"] == 3
+    assert new_ds.kwargs["max_buffer_input_shards"] == 1
+
+    class OldDataset:
+        def __init__(self):
+            self.calls = []
+
+        def shuffle(self, **kwargs):
+            self.calls.append(kwargs)
+            if "max_buffer_input_shards" in kwargs:
+                raise TypeError(
+                    "IterableDataset.shuffle() got an unexpected keyword "
+                    "argument 'max_buffer_input_shards'"
+                )
+            return self
+
+    old_ds = OldDataset()
+    assert _shuffle_streaming_dataset(old_ds, 10, seed=3) is old_ds
+    assert len(old_ds.calls) == 2, old_ds.calls
+    assert "max_buffer_input_shards" not in old_ds.calls[-1]
+    assert old_ds.calls[-1]["buffer_size"] == 10
+    assert old_ds.calls[-1]["seed"] == 3
+    print("shuffle compatibility: new + old datasets OK")
+
+
 def main() -> None:
     test_blocks()
     test_batches()
     test_drop_last()
     test_bad_block_size()
     test_bad_eot()
+    test_shuffle_compatibility()
     print("all data pipeline tests passed")
 
 

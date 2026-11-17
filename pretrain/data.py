@@ -37,6 +37,7 @@ Notes
 from __future__ import annotations
 
 import argparse
+import logging
 import time
 from functools import lru_cache
 from typing import Iterable, Iterator, Optional
@@ -52,6 +53,36 @@ DEFAULT_TOKENIZER = "gpt2"
 def get_encoder(name: str = DEFAULT_TOKENIZER) -> tiktoken.Encoding:
     """Return (and cache) a tiktoken encoding by name."""
     return tiktoken.get_encoding(name)
+
+
+def _shuffle_streaming_dataset(ds, shuffle_buffer: int, seed: int):
+    """Shuffle a streaming dataset across datasets versions.
+
+    Newer ``datasets`` releases accept ``max_buffer_input_shards``; older
+    ones (including the version often preinstalled on Kaggle) do not. Fall
+    back to a plain streaming shuffle in that case.
+    """
+    if shuffle_buffer <= 1:
+        return ds
+
+    try:
+        return ds.shuffle(
+            buffer_size=shuffle_buffer,
+            seed=seed,
+            max_buffer_input_shards=1,
+        )
+    except TypeError as exc:
+        if "max_buffer_input_shards" not in str(exc):
+            raise
+        logging.warning(
+            "datasets version does not support max_buffer_input_shards; "
+            "using plain streaming shuffle instead."
+        )
+
+    try:
+        return ds.shuffle(buffer_size=shuffle_buffer, seed=seed)
+    except TypeError:
+        return ds.shuffle(buffer_size=shuffle_buffer)
 
 
 def iter_openwebtext_documents(
@@ -93,16 +124,7 @@ def iter_openwebtext_documents(
         return
 
     ds = load_dataset(dataset_name, split=split, streaming=True)
-    if shuffle_buffer > 1:
-        # Keep the shuffle buffer within one input shard. The datasets
-        # default (10) can wait on many remote shards before yielding the
-        # first example; one shard is enough to mix documents while keeping
-        # startup fast for a streaming pipeline.
-        ds = ds.shuffle(
-            buffer_size=shuffle_buffer,
-            seed=seed,
-            max_buffer_input_shards=1,
-        )
+    ds = _shuffle_streaming_dataset(ds, shuffle_buffer, seed)
 
     yielded = 0
     for example in ds:

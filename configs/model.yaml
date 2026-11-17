@@ -1,0 +1,10 @@
+# configs/model.yaml
+
+vocab_size: 50257        # Vocabulary size
+context_length: 128      # Context length
+emb_dim: 768             # Embedding dimension
+n_heads: 12              # Number of attention heads (head_dim = 64)
+n_layers: 9              # Number of layers
+drop_rate: 0.1           # Dropout rate
+qkv_bias: false          # Query-Key-Value bias
+tie_weights: true        # Tie output head to token embeddings (GPT-2 style)

@@ -1,0 +1,45 @@
+# Pretraining configuration for configs/model.yaml
+#
+# Hardware:
+#   device: auto  -> use min(num_gpus, available GPUs), else CPU
+#   device: cpu   -> force CPU
+#   device: cuda  -> use up to num_gpus GPUs
+#   device: cuda:1 -> force one specific GPU
+
+seed: 1337
+device: auto
+num_gpus: 2
+amp: true
+amp_dtype: auto        # auto | bf16 | fp16 | fp32
+
+batch_size: 8
+grad_accum_steps: 1
+max_steps: null        # null = train until interrupted / data exhausted
+learning_rate: 3.0e-4
+min_lr: 3.0e-5
+warmup_steps: 200
+weight_decay: 0.1
+betas: [0.9, 0.95]
+grad_clip: 1.0
+log_interval: 10
+
+checkpoint_interval_minutes: 60
+checkpoint_dir: checkpoints
+out_dir: out            # local metrics + plots; also uploaded to HF under out/
+save_optimizer: true    # false = smaller checkpoints, optimizer starts fresh
+progress: true          # tqdm.auto; works in notebooks and terminals
+
+data:
+  dataset_name: Skylion007/openwebtext
+  split: train
+  block_size: null     # null -> model context_length
+  shuffle_buffer: 1000
+  max_docs: null
+  min_chars: 1
+
+hf:
+  repo_id: "sddfhy546y/minillm"  # e.g. "your-username/minillm"
+  token_env: HF_TOKEN  # read from .env or the environment
+  filename: minillm_latest.pt
+  out_dir: out         # plots/metrics path inside the HF repo
+  private: true

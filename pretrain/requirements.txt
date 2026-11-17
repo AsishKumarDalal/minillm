@@ -1,0 +1,12 @@
+# Data pipeline
+tiktoken
+datasets
+numpy
+
+# Training (on CPU-only Linux, install torch from the CPU index:
+#   pip install torch --index-url https://download.pytorch.org/whl/cpu )
+torch
+pyyaml
+huggingface_hub
+tqdm
+matplotlib

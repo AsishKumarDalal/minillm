@@ -1,0 +1,17 @@
+# Full dependency list for minillm.
+#
+# Kaggle already has torch, datasets, numpy, and tqdm installed. Running
+# `pip install -r requirements.txt` is still safe: pip skips packages whose
+# installed version already satisfies the requirement.
+
+# Data pipeline
+tiktoken
+datasets
+numpy
+
+# Training + checkpoint sync + plots
+torch
+pyyaml
+huggingface_hub
+tqdm
+matplotlib

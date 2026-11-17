@@ -1,0 +1,27 @@
+# Secrets / local environment
+.env
+.env.*
+!.env.example
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ipynb_checkpoints/
+
+# Training artifacts
+checkpoints/
+out/
+smoke_ckpt/
+*.pt
+*.pth
+*.ckpt
+*.onnx
+*.png
+*.jpg
+*.jpeg
+*.svg
+
+# OS / editor
+.DS_Store

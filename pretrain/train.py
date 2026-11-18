@@ -127,12 +127,35 @@ def load_env_file(path: Path) -> None:
             os.environ[key] = value
 
 
+class _TqdmLoggingHandler(logging.StreamHandler):
+    """Print log lines above the active tqdm bar instead of through it."""
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            message = self.format(record)
+            tqdm.write(message, file=self.stream)
+            self.flush()
+        except Exception:
+            self.handleError(record)
+
+
 def setup_logging() -> None:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s | %(levelname)s | %(message)s",
-        force=True,
+    handler = _TqdmLoggingHandler()
+    handler.setFormatter(
+        logging.Formatter("%(asctime)s | %(levelname)s | %(message)s")
     )
+    logging.basicConfig(level=logging.INFO, handlers=[handler], force=True)
+    # Keep the log readable: these libraries log every HTTP range request or
+    # backend probe at INFO level.
+    for name in (
+        "httpx",
+        "httpcore",
+        "urllib3",
+        "datasets",
+        "huggingface_hub",
+        "numexpr",
+    ):
+        logging.getLogger(name).setLevel(logging.WARNING)
 
 
 # ---------------------------------------------------------------------------
@@ -1095,6 +1118,10 @@ class Trainer:
             unit=progress_unit,
             dynamic_ncols=True,
             disable=not show_progress,
+            postfix="",
+            # A clean percentage bar; the default time-based bar would print
+            # awkward values like "5.386/3600.0 s" and "1.00 s/s".
+            bar_format="{desc}: {percentage:3.0f}%|{bar:20}|{postfix}",
         )
         pbar_last_time = now
         last_log_time = time.monotonic()
@@ -1210,15 +1237,13 @@ class Trainer:
                 # Update the bar every step so tokens_seen and loss visibly
                 # move; only record/log metrics at the configured intervals.
                 postfix = {
+                    "step": f"{self.step:,}",
                     "loss": f"{loss_value:.4f}",
                     "ppl": ppl_text,
                     "tokens": f"{self.tokens_seen:,}",
                     "lr": f"{lr:.2e}",
                     "tok_s": f"{tok_s:,.1f}",
                 }
-                if progress_time_based:
-                    # The percentage is time-based, so show the step count too.
-                    postfix["step"] = f"{self.step:,}"
                 if self.max_train_seconds is not None:
                     remaining = max(
                         0.0,

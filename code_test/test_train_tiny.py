@@ -294,6 +294,7 @@ def test_progress_bar_percentage(tmpdir: str) -> None:
             self.postfix = {}
             self.resets = 0
             self.closed = False
+            self.bar_format = kwargs.get("bar_format", "")
             bars.append(self)
 
         def update(self, n=1.0):
@@ -351,6 +352,9 @@ def test_progress_bar_percentage(tmpdir: str) -> None:
         assert bar.total == 2 and bar.unit == "step", (bar.total, bar.unit)
         assert bar.desc == "pretrain", bar.desc
         assert bar.n == 2, bar.n
+        assert "{percentage" in bar.bar_format, bar.bar_format
+        assert "{postfix}" in bar.bar_format, bar.bar_format
+        assert "step" in bar.postfix, bar.postfix
 
         run_case(
             "hours",

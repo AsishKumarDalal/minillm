@@ -199,7 +199,8 @@ suffix updates `step` (when the bar is time-based), `tokens`, `loss`, `ppl`,
 `lr`, `tok/s`, and either `remaining_h` or `save_in` every step. INFO lines
 are only printed for the first `log_first_steps` steps (default 10) and then
 every `log_interval` steps (default 100), so a long run does not flood the
-output. Every `sample_interval` steps (default 1000) the script generates a
+output. HTTP range-request and dataset backend INFO chatter is suppressed;
+warnings still appear. Every `sample_interval` steps (default 1000) the script generates a
 short continuation of `sample_prompt` and logs it, which is the easiest way
 to eyeball whether the model is improving. Loss is noisy step-to-step; the
 trend is what matters, and the plots include a smoothed line.

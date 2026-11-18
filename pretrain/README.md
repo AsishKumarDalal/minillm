@@ -179,7 +179,8 @@ The bar always shows a percentage when there is a target:
 
 The suffix shows `step`, `tokens`, `loss`, `ppl`, `lr`, and `tok/s` every
 step. When time-based, it also shows `remaining_h` (with `max_hours`) or
-`save_in` (minutes until the next save).
+`save_in` (minutes until the next save). HTTP range-request/dataset INFO
+chatter from `httpx` and `datasets` is silenced; warnings still appear.
 
 In a notebook, pass an explicit argument list so argparse does not try to
 parse kernel arguments such as `-f`:

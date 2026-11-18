@@ -12,6 +12,10 @@ Features
   every ``checkpoint_interval_minutes`` (default: 60), plus at exit/Ctrl+C.
 * Optional wall-clock limit via ``--max-hours 6`` (or ``max_hours`` in the
   config): training stops after that many hours and still saves/uploads.
+* Optional token limit via ``--budget 15000000``: training stops at that many
+  tokens and the bar shows progress toward the budget. Without a limit the
+  bar shows tokens seen / the estimated token count of one OpenWebText pass
+  (``estimated_total_tokens`` in the config).
 * Writes ``out/metrics.json`` and token-vs-loss / token-vs-perplexity plots
   at the same interval, then uploads them to the HF repo's ``out/`` folder.
 * On startup, resumes from ``checkpoints/minillm_latest.pt`` if it exists,
@@ -51,6 +55,9 @@ Usage
 
     # Stop after 12 hours and save/upload the final checkpoint
     .venv/bin/python -m pretrain.train --hours 12
+
+    # Stop after 15M tokens; the bar counts toward that budget
+    .venv/bin/python -m pretrain.train --budget 15000000
 """
 
 from __future__ import annotations
@@ -62,6 +69,7 @@ import logging
 import math
 import os
 import random
+import signal
 import sys
 import time
 from pathlib import Path
@@ -519,6 +527,10 @@ class Trainer:
         self.max_train_seconds: Optional[float] = None
         self.last_sample_text: Optional[str] = None
         self.nonfinite_streak = 0
+        # Used by the final sync so every exit path (Ctrl+C, SIGTERM, crash,
+        # normal stop) ends with the newest finite checkpoint on HF.
+        self.last_saved_step = 0
+        self.last_uploaded_step = 0
 
         self.amp_dtype = choose_amp_dtype(device, train_cfg)
         self.use_amp = self.amp_dtype is not None
@@ -1074,12 +1086,37 @@ class Trainer:
             len(output_files),
         )
 
+        self.last_saved_step = self.step
         if self.hf_cfg:
-            upload_checkpoint(self.checkpoint_path, self.hf_cfg, self.step)
+            uploaded = upload_checkpoint(
+                self.checkpoint_path, self.hf_cfg, self.step
+            )
             upload_outputs(self.out_dir, self.hf_cfg, self.step)
+            if uploaded:
+                self.last_uploaded_step = self.step
 
         self.last_checkpoint_time = time.monotonic()
         return True
+
+    def final_sync(self) -> None:
+        """Save/upload the newest finite checkpoint on every exit path.
+
+        ``train()`` already saves on a clean stop, so this usually only
+        re-uploads if the periodic upload failed. On Ctrl+C, SIGTERM, or a
+        crash it performs the save itself. ``save_checkpoint()`` refuses
+        non-finite weights, so a diverged model is never uploaded.
+        """
+        if self.step <= 0:
+            return
+        if self.last_saved_step != self.step and not self.save_checkpoint():
+            return
+        if self.hf_cfg and self.last_uploaded_step != self.step:
+            uploaded = upload_checkpoint(
+                self.checkpoint_path, self.hf_cfg, self.step
+            )
+            upload_outputs(self.out_dir, self.hf_cfg, self.step)
+            if uploaded:
+                self.last_uploaded_step = self.step
 
     # -- main loop ----------------------------------------------------------
     def train(self, batches: Iterable[tuple[np.ndarray, np.ndarray]]) -> None:
@@ -1102,39 +1139,73 @@ class Trainer:
             self.max_train_seconds = max_hours * 3600.0
         else:
             self.max_train_seconds = None
+        token_budget = cfg.get("token_budget")
+        if token_budget is not None:
+            token_budget = int(token_budget)
+            if token_budget <= 0:
+                raise ValueError("token_budget must be > 0")
+        estimated_total = cfg.get("estimated_total_tokens")
+        if estimated_total is not None:
+            estimated_total = int(estimated_total)
+            if estimated_total <= 0:
+                estimated_total = None
+
         self.train_start_time = time.monotonic()
         if self.max_train_seconds is not None:
             logging.info(
                 "Time limit: %.2f h; training will stop and save automatically.",
                 max_hours,
             )
+        if token_budget is not None:
+            logging.info(
+                "Token budget: %s tokens; training stops at that point.",
+                f"{token_budget:,}",
+            )
 
         batches = iter(batches)
         self.model.train()
         self.optimizer.zero_grad(set_to_none=True)
 
-        # Choose what the tqdm percentage measures:
-        #   * max_steps  -> percent of requested optimizer steps
-        #   * max_hours  -> percent of the wall-clock budget
-        #   * neither    -> percent of the time until the next checkpoint save,
-        #                   so the bar still shows a percentage and resets
-        #                   after every save instead of sitting at 0%.
+        # Choose what the tqdm percentage measures (first match wins):
+        #   * --hours / max_hours       -> percent of the wall-clock budget
+        #   * --budget / token_budget   -> percent of that many tokens
+        #   * max_steps                 -> percent of requested optimizer steps
+        #   * estimated_total_tokens    -> tokens seen / one OpenWebText pass
+        #   * otherwise                 -> time until the next checkpoint save
         now = time.monotonic()
         progress_time_based = False
-        if max_steps is not None:
-            progress_total: Optional[float] = max_steps
-            progress_initial: float = min(self.step, max_steps)
-            progress_unit = "step"
-            progress_desc = "pretrain"
-        elif self.max_train_seconds is not None:
+        progress_token_based = False
+        if self.max_train_seconds is not None:
             progress_time_based = True
-            progress_total = self.max_train_seconds
-            progress_initial = min(
+            progress_total: Optional[float] = self.max_train_seconds
+            progress_initial: float = min(
                 progress_total,
                 max(0.0, now - self.train_start_time),
             )
             progress_unit = "s"
             progress_desc = "pretrain (time budget)"
+        elif token_budget is not None:
+            progress_token_based = True
+            progress_total = float(token_budget)
+            progress_initial = min(progress_total, float(self.tokens_seen))
+            progress_unit = "token"
+            progress_desc = "pretrain (token budget)"
+        elif max_steps is not None:
+            progress_total = float(max_steps)
+            progress_initial = min(progress_total, float(self.step))
+            progress_unit = "step"
+            progress_desc = "pretrain"
+        elif estimated_total is not None:
+            progress_token_based = True
+            progress_total = float(estimated_total)
+            progress_initial = min(progress_total, float(self.tokens_seen))
+            progress_unit = "token"
+            progress_desc = "pretrain (OpenWebText tokens)"
+            logging.info(
+                "Progress bar: tokens seen / estimated %s tokens "
+                "(one full OpenWebText pass).",
+                f"{estimated_total:,}",
+            )
         elif self.interval_seconds > 0:
             progress_time_based = True
             progress_total = self.interval_seconds
@@ -1146,7 +1217,7 @@ class Trainer:
             progress_desc = "pretrain (to next save)"
         else:
             progress_total = None
-            progress_initial = self.step
+            progress_initial = float(self.step)
             progress_unit = "step"
             progress_desc = "pretrain"
 
@@ -1172,7 +1243,10 @@ class Trainer:
         failed = False
 
         try:
-            while max_steps is None or self.step < max_steps:
+            while (
+                (max_steps is None or self.step < max_steps)
+                and (token_budget is None or self.tokens_seen < token_budget)
+            ):
                 micro_losses = []
                 step_tokens = 0
                 data_exhausted = False
@@ -1260,6 +1334,8 @@ class Trainer:
                 if progress_time_based:
                     pbar.update(max(0.0, now - pbar_last_time))
                     pbar_last_time = now
+                elif progress_token_based:
+                    pbar.update(step_tokens)
                 else:
                     pbar.update(1)
 
@@ -1327,6 +1403,10 @@ class Trainer:
                     self.max_train_seconds is not None
                     and (now - self.train_start_time) >= self.max_train_seconds
                 )
+                budget_reached = (
+                    token_budget is not None
+                    and self.tokens_seen >= token_budget
+                )
 
                 if (
                     not time_up
@@ -1346,6 +1426,16 @@ class Trainer:
 
                 if data_exhausted:
                     logging.info("Data stream exhausted at step %d.", self.step)
+                    break
+
+                if budget_reached:
+                    logging.info(
+                        "Reached --budget (%s tokens) at step %d (%s tokens); "
+                        "stopping and saving checkpoint.",
+                        f"{token_budget:,}",
+                        self.step,
+                        f"{self.tokens_seen:,}",
+                    )
                     break
 
                 if time_up:
@@ -1494,7 +1584,35 @@ def run_training(
     )
     batches = stream.batches(batch_size=batch_size, drop_last=True)
 
-    trainer.train(batches)
+    def _terminate(signum, _frame):
+        # Turn "kill"/SIGTERM into the same clean-exit path as Ctrl+C so the
+        # final checkpoint is still saved and uploaded.
+        raise KeyboardInterrupt(f"signal {signum}")
+
+    previous_sigterm = None
+    try:
+        previous_sigterm = signal.signal(signal.SIGTERM, _terminate)
+    except (ValueError, OSError):
+        pass  # signal handlers can only be installed in the main thread
+
+    try:
+        trainer.train(batches)
+    except KeyboardInterrupt:
+        logging.info("Interrupted; saving the final checkpoint before exit.")
+        raise
+    except Exception:
+        logging.exception(
+            "Training crashed; attempting a final finite checkpoint save."
+        )
+        raise
+    finally:
+        if previous_sigterm is not None:
+            try:
+                signal.signal(signal.SIGTERM, previous_sigterm)
+            except (ValueError, OSError):
+                pass
+        # Always end with the newest finite checkpoint on HF, unless --no-hf.
+        trainer.final_sync()
     logging.info("Training finished.")
 
 
@@ -1513,6 +1631,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=DEFAULT_MODEL_CONFIG,
     )
     parser.add_argument("--max-steps", type=int, default=None)
+    parser.add_argument(
+        "--budget",
+        "--token-budget",
+        type=int,
+        default=None,
+        dest="token_budget",
+        help="Train until this many tokens have been seen (e.g. 15000000). "
+             "The bar shows tokens seen / budget. Without this and --hours, "
+             "the bar uses the estimated token count of one OpenWebText pass.",
+    )
     parser.add_argument(
         "--max-hours",
         "--hours",
@@ -1550,6 +1678,8 @@ def main(argv: Optional[list[str]] = None) -> None:
 
     if args.max_steps is not None:
         pretrain_cfg["max_steps"] = args.max_steps
+    if args.token_budget is not None:
+        pretrain_cfg["token_budget"] = args.token_budget
     if args.max_hours is not None:
         pretrain_cfg["max_hours"] = args.max_hours
     if args.batch_size is not None:

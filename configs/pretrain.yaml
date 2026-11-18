@@ -16,6 +16,15 @@ batch_size: 8
 grad_accum_steps: 1
 max_steps: null        # null = train until interrupted / time limit / data exhausted
 max_hours: null        # e.g. 6 or 12; stop after N wall-clock hours and upload
+token_budget: null     # e.g. 15000000; stop after N tokens (--budget overrides)
+
+# Estimated GPT-2 BPE tokens in one full pass of Skylion007/openwebtext.
+# Used only as the progress-bar denominator when no --hours/--budget is given.
+# Source: HF dataset metadata reports 39,769,491,688 text bytes over
+# 8,013,769 documents (huggingface.co/api/datasets/Skylion007/openwebtext).
+# Sampling 500 documents with tiktoken's "gpt2" encoder gave 4.4325 bytes/token,
+# so 39,769,491,688 / 4.4325 ~= 8.97B tokens.
+estimated_total_tokens: 8972315576
 learning_rate: 3.0e-4
 min_lr: 3.0e-5
 warmup_steps: 200
@@ -23,7 +32,7 @@ weight_decay: 0.1
 betas: [0.9, 0.95]
 grad_clip: 1.0
 log_first_steps: 10    # log every step for the first N steps
-log_interval: 100      # after that, log every N steps (100, 200, ...)
+log_interval: 100      # after that, record a metrics point every N steps
 
 # Every sample_interval steps, generate a short continuation of sample_prompt
 # and write it to the log so you can eyeball whether the model is improving.

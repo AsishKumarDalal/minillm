@@ -174,6 +174,25 @@ max_hours: 6
 The stop is checked after each optimizer step. When reached, training exits
 cleanly and the final checkpoint + `out/` files are saved and uploaded.
 
+Stop after a fixed number of tokens instead; the bar counts toward that
+budget (e.g. 15M tokens):
+
+```python
+main(["--budget", "15000000"])
+```
+
+```yaml
+token_budget: 15000000
+```
+
+With neither `--hours` nor `--budget`, the bar shows
+`tokens_seen / estimated_total_tokens` — roughly `tokens seen / 8.97B` for
+one full pass of OpenWebText. The estimate is stored in
+`configs/pretrain.yaml` as `estimated_total_tokens` and was derived from the
+HF dataset metadata (39,769,491,688 text bytes, 8,013,769 documents) and a
+500-document sample tokenized with `tiktoken`'s `gpt2` encoder (4.4325
+bytes/token). It is only a progress denominator; it does not stop training.
+
 ### What you should see
 
 ```text
@@ -191,10 +210,12 @@ step 10 | tokens_seen 10,240 | loss 9.7xxx | ppl 17,xxx | lr ...
 sample @ step 1000 | Albert Einstein is a ...
 ```
 
-The `tqdm.auto` progress bar always shows a percentage when a target is
-known. With `max_steps` it tracks percent of steps; with `max_hours` it
-tracks percent of the wall-clock budget; with neither it tracks percent of
-the time until the next checkpoint save and resets after each save. The
+The `tqdm.auto` progress bar always shows a percentage. In order of
+precedence: `--hours` → percent of the wall-clock budget; `--budget` →
+percent of that many tokens; `max_steps` → percent of steps; otherwise
+`tokens_seen / estimated_total_tokens` (one estimated OpenWebText pass,
+~8.97B tokens, from `configs/pretrain.yaml`). Only the bare time-to-next-save
+fallback resets after every save. The
 suffix shows the compact stats `#step`, `t/s`, `tok`, `ppl`, and `loss` every
 step, e.g. `#81 | 5.5k t/s | 82.9k tok | ppl 13.1k | loss 9.480`. The
 notebook bar reserves 26% of the row for the bar so the stats, including
@@ -259,9 +280,11 @@ out/training_curves.png
 ```
 
 Checkpoints and plots are written/uploaded every 60 minutes, at normal exit,
-on a single notebook Interrupt, and when the `max_hours` time limit is
-reached. If your Kaggle session often dies before one hour, change
-`checkpoint_interval_minutes` to 10.
+on a notebook Interrupt, on SIGTERM, when the `max_hours` time limit or
+`--budget` token limit is reached, and on any caught crash. Unless `--no-hf`
+is passed, the final sync uploads the newest finite checkpoint and `out/`
+files on every one of these paths. If your Kaggle session often dies before
+one hour, change `checkpoint_interval_minutes` to 10.
 
 ---
 
@@ -313,6 +336,8 @@ Leave `vocab_size: 50257` and `tie_weights: true`.
 | `grad_accum_steps` | `1` | Micro-batches per optimizer step. Raise it to simulate a larger batch. |
 | `max_steps` | `null` | `null` trains until interrupted, time limit, or data exhausted. Set an integer for a fixed step count. |
 | `max_hours` | `null` | `null` = no time limit. Set `6` or `12` to stop after that many wall-clock hours and save/upload the final checkpoint. CLI: `--hours 6`. |
+| `token_budget` | `null` | `null` = no token limit. Set e.g. `15000000` to stop at that many tokens. CLI: `--budget 15000000`. |
+| `estimated_total_tokens` | `8972315576` | Only the default bar denominator (tokens seen / one estimated OpenWebText pass). Does not stop training. |
 | `grad_clip` | `1.0` | Gradient clipping. Leave as is. |
 | `progress` | `true` | Uses `tqdm.auto` for notebook-friendly bars. |
 
@@ -382,6 +407,7 @@ still want the checkpoint and plots uploaded to HF.
 | Fast smoke run | `max_steps: 20`, `batch_size: 2`, `data.max_docs: 5` |
 | Stop after 6 hours | `max_hours: 6` or CLI `main(["--hours", "6"])` |
 | Stop after 12 hours | `max_hours: 12` or CLI `main(["--hours", "12"])` |
+| Stop after 15M tokens | `token_budget: 15000000` or CLI `main(["--budget", "15000000"])` |
 | Smaller model | `emb_dim: 256`, `n_heads: 4`, `n_layers: 4` (keep `vocab_size: 50257`) |
 | Save more often | `checkpoint_interval_minutes: 10` |
 | Denser plots | `log_interval: 1` or `2` |

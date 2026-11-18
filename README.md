@@ -15,6 +15,8 @@ python3 -m pip install -r requirements.txt
 python -m pretrain.train
 # or stop after 12 hours and upload the final checkpoint:
 python -m pretrain.train --hours 12
+# or stop after 15M tokens; the bar counts toward that budget:
+python -m pretrain.train --budget 15000000
 ```
 
 In Kaggle, follow the detailed [pretraining runbook](runbook/pretrain.md).

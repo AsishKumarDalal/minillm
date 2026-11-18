@@ -375,6 +375,7 @@ def test_progress_bar_percentage(tmpdir: str) -> None:
             hf_cfg=None,
         )
         trainer.train(make_batches(num_steps=num_batches, seed=17))
+        return trainer
 
     original = train_mod.tqdm
     train_mod.tqdm = FakeTqdm
@@ -441,6 +442,49 @@ def test_progress_bar_percentage(tmpdir: str) -> None:
         assert bar.total == 3600.0 and bar.unit == "s", (bar.total, bar.unit)
         assert "to next save" in bar.desc, bar.desc
         assert "#" in bar.postfix and "loss" in bar.postfix, bar.postfix
+
+        trainer = run_case(
+            "budget",
+            {
+                "max_steps": None,
+                "max_hours": None,
+                "token_budget": 200,
+                "checkpoint_interval_minutes": 60,
+            },
+            num_batches=3,
+        )
+        bar = bars[-1]
+        assert bar.total == 200 and bar.unit == "token", (bar.total, bar.unit)
+        assert "token budget" in bar.desc, bar.desc
+        assert bar.n == trainer.tokens_seen == 48, (bar.n, trainer.tokens_seen)
+
+        trainer = run_case(
+            "budget-stop",
+            {
+                "max_steps": None,
+                "max_hours": None,
+                "token_budget": 16,
+                "checkpoint_interval_minutes": 60,
+            },
+            num_batches=5,
+        )
+        assert trainer.step == 1, trainer.step
+        assert trainer.tokens_seen == 16, trainer.tokens_seen
+
+        run_case(
+            "estimate",
+            {
+                "max_steps": None,
+                "max_hours": None,
+                "estimated_total_tokens": 1000,
+                "checkpoint_interval_minutes": 60,
+            },
+            num_batches=3,
+        )
+        bar = bars[-1]
+        assert bar.total == 1000 and bar.unit == "token", (bar.total, bar.unit)
+        assert "OpenWebText tokens" in bar.desc, bar.desc
+        assert bar.n == 48, bar.n
 
         run_case(
             "reset",
@@ -858,7 +902,66 @@ def test_new_and_no_hf_flags(tmpdir: str) -> None:
     assert args.no_hf and not args.new
     args = parser.parse_args(["--new", "--no-hf"])
     assert args.new and args.no_hf
-    print("--new/--no-hf fresh-start flags OK")
+    args = parser.parse_args(["--budget", "15000000"])
+    assert args.token_budget == 15_000_000, args.token_budget
+    args = parser.parse_args(["--hours", "6"])
+    assert args.max_hours == 6.0, args.max_hours
+    print("--new/--no-hf/--budget/--hours flags OK")
+
+
+def test_final_sync_uploads_on_interrupt(tmpdir: str) -> None:
+    """Ctrl+C / SIGTERM still end with a finite checkpoint on HF."""
+    import pretrain.train as train_mod
+
+    cfg = dict(TRAIN_CFG)
+    cfg.update(
+        {
+            "checkpoint_dir": str(Path(tmpdir) / "ckpt"),
+            "out_dir": str(Path(tmpdir) / "out"),
+            "max_steps": 1,
+            "progress": False,
+        }
+    )
+    device, _ = select_device(cfg)
+    model = GPT(MODEL_CFG)
+    trainer = Trainer(
+        model=model,
+        optimizer=torch.optim.AdamW(model.parameters(), lr=1e-3),
+        device=device,
+        model_cfg=MODEL_CFG,
+        train_cfg=cfg,
+        hf_cfg={
+            "repo_id": "someone/minillm",
+            "token": "secret-token",
+            "filename": "minillm_latest.pt",
+            "out_dir": "out",
+            "private": True,
+        },
+    )
+    trainer.train(make_batches(num_steps=1, seed=1))
+    # Pretend the periodic save/upload never happened (as on an interrupt).
+    trainer.last_saved_step = 0
+    trainer.last_uploaded_step = 0
+    uploaded = []
+    original = train_mod.upload_checkpoint
+    original_outputs = train_mod.upload_outputs
+
+    def fake_upload(path, hf, step):
+        uploaded.append(step)
+        return True
+
+    train_mod.upload_checkpoint = fake_upload
+    train_mod.upload_outputs = lambda *args, **kwargs: True
+    try:
+        trainer.final_sync()
+    finally:
+        train_mod.upload_checkpoint = original
+        train_mod.upload_outputs = original_outputs
+
+    assert uploaded == [1], uploaded
+    assert trainer.last_saved_step == 1
+    assert trainer.last_uploaded_step == 1
+    print("final sync uploads on interrupt OK")
 
 
 def main() -> None:
@@ -882,6 +985,8 @@ def main() -> None:
         test_loss_and_perplexity_decrease(tmpdir)
     with tempfile.TemporaryDirectory() as tmpdir:
         test_time_limit_stops_saves_and_uploads(tmpdir)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        test_final_sync_uploads_on_interrupt(tmpdir)
     test_lr_schedule()
     test_env_file()
     test_hf_settings_warnings()

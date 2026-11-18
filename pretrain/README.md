@@ -172,12 +172,24 @@ The script imports `tqdm.auto`, so calling `main()` in a Kaggle/Jupyter
 notebook renders a notebook progress bar. It falls back to a terminal bar in
 a normal shell. Set `progress: false` in `configs/pretrain.yaml` to disable it.
 
-The bar always shows a percentage when there is a target:
+The bar always shows a percentage; what it measures depends on the flags
+(first match wins):
 
+- `--hours 6` / `max_hours` → percentage of the wall-clock budget (and stops
+  training when the budget is used up). Desc: `pretrain (time budget)`.
+- `--budget 15000000` / `token_budget` → percentage of that many tokens
+  (and stops training at that token count). Desc: `pretrain (token budget)`.
 - `max_steps` set → percentage of requested optimizer steps.
-- `max_hours` set → percentage of the wall-clock budget.
-- neither set → percentage of the time until the next checkpoint save,
-  resetting after every save. This is the normal open-ended pretraining mode.
+- none of the above → `tokens_seen / estimated_total_tokens`, i.e. how far
+  through one estimated full pass of OpenWebText you are. The estimate
+  (~8.97B GPT-2 BPE tokens) is in `configs/pretrain.yaml`. Desc:
+  `pretrain (OpenWebText tokens)`.
+- no estimate either → percentage of the time until the next checkpoint save,
+  resetting after every save.
+
+The token estimate comes from the Hugging Face dataset metadata (39,769,491,688
+text bytes over 8,013,769 documents) combined with a 500-document sample
+tokenized with `tiktoken`'s `gpt2` encoding (4.4325 bytes/token).
 
 The suffix shows the same four metrics every step, in a compact form:
 
@@ -205,7 +217,10 @@ main(["--device", "cuda", "--max-steps", "100"])
 ## Checkpoints and resume
 
 Every `checkpoint_interval_minutes` (default **60**), plus at normal exit,
-on `Ctrl+C`, and when the `--hours` time limit is reached, the script:
+on `Ctrl+C`, on `SIGTERM`, when the `--hours` time limit or `--budget` token
+limit is reached — and on any caught crash — the script performs a final
+sync. Unless `--no-hf` was passed, the newest finite checkpoint and `out/`
+files are uploaded to HF on every one of these exit paths. It:
 
 1. Saves `checkpoints/minillm_latest.pt` atomically.
 2. Writes the local `out/` folder:

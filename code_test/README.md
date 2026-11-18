@@ -46,15 +46,16 @@ This checks:
 - tiny model forward/backward and optimizer steps
 - GPT-2 initialization keeps the initial loss near `ln(vocab_size)`
 - gradient accumulation
-- sparse logging schedule (first N steps, then every `log_interval`)
-- tqdm percentage modes (`max_steps`, `max_hours`, next checkpoint)
+- sparse logging (full INFO lines first N steps; plot points every `log_interval`)
+- tqdm percentage modes (`--hours`, `--budget`, `max_steps`, estimated OpenWebText tokens, next checkpoint)
 - one continuous green bar with `t/s`, tokens, ppl, loss; samples written above it
 - periodic sample generation from `sample_prompt`
 - `--new` starts fresh but keeps HF sync; `--no-hf` starts fresh with no HF
 - linear warmup + cosine LR schedule
 - local checkpoint save/resume (model, optimizer, step, tokens)
 - rejection of NaN checkpoints and refusal to save NaN weights
-- wall-clock time limit stops training and saves/uploads the final checkpoint
+- wall-clock time limit and token budget stop training and save/upload the final checkpoint
+- final sync re-uploads the newest finite checkpoint on interrupt/crash paths
 - metrics history restore and loss/perplexity decreasing as tokens increase
 - local `out/metrics.json` plus loss, perplexity, and combined plots
 - `.env` parsing

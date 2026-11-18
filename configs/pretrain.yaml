@@ -22,7 +22,17 @@ warmup_steps: 200
 weight_decay: 0.1
 betas: [0.9, 0.95]
 grad_clip: 1.0
-log_interval: 10
+log_first_steps: 10    # log every step for the first N steps
+log_interval: 100      # after that, log every N steps (100, 200, ...)
+
+# Every sample_interval steps, generate a short continuation of sample_prompt
+# and write it to the log so you can eyeball whether the model is improving.
+# Set sample_interval: 0 to disable.
+sample_interval: 1000
+sample_prompt: "Einstein was a"
+sample_max_new_tokens: 60
+sample_temperature: 0.8
+sample_top_k: 50
 
 checkpoint_interval_minutes: 60
 checkpoint_dir: checkpoints

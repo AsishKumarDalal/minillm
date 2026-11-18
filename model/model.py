@@ -1,3 +1,5 @@
+import math
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -27,14 +29,39 @@ class GPT(nn.Module):
         self.out_head = nn.Linear(
             cfg["emb_dim"], cfg["vocab_size"], bias=False
         )
+        # GPT-2 style initialization. PyTorch's default N(0, 1) embedding and
+        # linear init makes the initial logits huge (loss ~400+) and the run
+        # diverges to NaN within a few hundred steps. std=0.02 keeps the
+        # initial loss near ln(vocab_size) and training stable.
+        self.apply(self._init_weights)
+
         # GPT-2 style weight tying: the output head shares the token
         # embedding matrix. Saves ~19.3M parameters with this config.
         if cfg.get("tie_weights", True):
             self.out_head.weight = self.tok_emb.weight
 
+        # Scale residual output projections by 1/sqrt(2 * n_layers) so the
+        # residual stream variance stays bounded as depth grows.
+        residual_std = 0.02 / math.sqrt(2 * cfg["n_layers"])
+        for name, param in self.named_parameters():
+            if name.endswith("out_proj.weight") or name.endswith(
+                "ff.layers.2.weight"
+            ):
+                nn.init.normal_(param, mean=0.0, std=residual_std)
+
         # Plain attribute (not a module/buffer), so cache tensors never enter
         # state_dict() or change checkpoint compatibility.
         self.kv_caches = None
+
+    @staticmethod
+    def _init_weights(module):
+        """GPT-2 style init: N(0, 0.02) weights, zero biases."""
+        if isinstance(module, nn.Linear):
+            nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            if module.bias is not None:
+                nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.Embedding):
+            nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
     # -- KV cache lifecycle -------------------------------------------------
     def build_cache(

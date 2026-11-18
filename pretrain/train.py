@@ -69,7 +69,7 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from model.model import GPT
-from pretrain.data import OpenWebTextTokenStream
+from pretrain.data import OpenWebTextTokenStream, get_encoder
 
 DEFAULT_PRETRAIN_CONFIG = ROOT_DIR / "configs" / "pretrain.yaml"
 DEFAULT_MODEL_CONFIG = ROOT_DIR / "configs" / "model.yaml"
@@ -453,6 +453,8 @@ class Trainer:
         self.last_metric_step = 0
         self.train_start_time: Optional[float] = None
         self.max_train_seconds: Optional[float] = None
+        self.last_sample_text: Optional[str] = None
+        self.nonfinite_streak = 0
 
         self.amp_dtype = choose_amp_dtype(device, train_cfg)
         self.use_amp = self.amp_dtype is not None
@@ -460,70 +462,99 @@ class Trainer:
 
     # -- checkpoint loading -------------------------------------------------
     def resume(self) -> bool:
-        path: Optional[Path] = None
+        # Prefer the local checkpoint. Downloading the HF copy can overwrite a
+        # good local checkpoint with a diverged (NaN) one.
+        if self.checkpoint_path.exists():
+            logging.info("Using local checkpoint: %s", self.checkpoint_path)
+            if self._load_checkpoint(self.checkpoint_path):
+                return True
+            logging.warning(
+                "Local checkpoint %s is unusable; trying remote.", self.checkpoint_path
+            )
 
         if self.hf_cfg:
             path = download_checkpoint(self.hf_cfg, self.checkpoint_dir)
+            if path is not None and self._load_checkpoint(path):
+                return True
 
-        if path is None and self.checkpoint_path.exists():
-            path = self.checkpoint_path
-            logging.info("Using local checkpoint: %s", path)
+        logging.warning("No usable checkpoint found; starting training from scratch.")
+        return False
 
-        if path is None:
-            logging.warning("No checkpoint found; starting training from scratch.")
-            return False
+    @staticmethod
+    def _nonfinite_tensors(state: dict, limit: int = 5) -> list[str]:
+        bad = []
+        for name, value in state.items():
+            if torch.is_tensor(value) and value.is_floating_point():
+                if not bool(torch.isfinite(value).all().item()):
+                    bad.append(name)
+                    if len(bad) >= limit:
+                        break
+        return bad
 
+    def _load_checkpoint(self, path: Path) -> bool:
         try:
-            ckpt = torch.load(path, map_location="cpu", weights_only=True)
-        except TypeError:
-            # Older PyTorch versions do not support weights_only.
             try:
+                ckpt = torch.load(path, map_location="cpu", weights_only=True)
+            except TypeError:
+                # Older PyTorch versions do not support weights_only.
                 ckpt = torch.load(path, map_location="cpu")
-            except Exception as exc:
-                logging.warning(
-                    "Could not read checkpoint %s (%s); starting from scratch.",
-                    path,
-                    exc,
-                )
-                return False
         except Exception as exc:
-            logging.warning(
-                "Could not read checkpoint %s (%s); starting from scratch.",
-                path,
-                exc,
-            )
+            logging.warning("Could not read checkpoint %s (%s).", path, exc)
             return False
 
         if not isinstance(ckpt, dict) or "model" not in ckpt:
-            logging.warning(
-                "Checkpoint %s has an unexpected format; starting fresh.", path
-            )
+            logging.warning("Checkpoint %s has an unexpected format.", path)
             return False
 
         saved_cfg = ckpt.get("model_config")
         if not isinstance(saved_cfg, dict):
-            logging.warning("Checkpoint has no model_config; starting fresh.")
+            logging.warning("Checkpoint %s has no model_config.", path)
             return False
 
         mismatches = model_config_mismatches(saved_cfg, self.model_cfg)
         if mismatches:
             logging.warning(
-                "Checkpoint model config does not match configs/model.yaml; "
-                "starting fresh. Differences: %s",
+                "Checkpoint model config does not match configs/model.yaml. "
+                "Differences: %s",
                 "; ".join(mismatches),
+            )
+            return False
+
+        bad_tensors = self._nonfinite_tensors(ckpt["model"])
+        if bad_tensors:
+            logging.warning(
+                "Checkpoint %s contains non-finite (NaN/Inf) weights in %s; "
+                "refusing to resume from it. Delete the local and remote "
+                "checkpoint, or resume an earlier finite one.",
+                path,
+                ", ".join(bad_tensors),
             )
             return False
 
         try:
             unwrap_model(self.model).load_state_dict(ckpt["model"], strict=True)
         except Exception as exc:
-            logging.warning("Could not load model weights: %s; starting fresh.", exc)
+            logging.warning("Could not load model weights: %s", exc)
             return False
 
         optimizer_state = ckpt.get("optimizer")
         if optimizer_state and bool(self.train_cfg.get("save_optimizer", True)):
             try:
                 self.optimizer.load_state_dict(optimizer_state)
+                bad_optimizer = [
+                    name
+                    for state in self.optimizer.state.values()
+                    for name, value in state.items()
+                    if torch.is_tensor(value)
+                    and value.is_floating_point()
+                    and not bool(torch.isfinite(value).all().item())
+                ]
+                if bad_optimizer:
+                    logging.warning(
+                        "Optimizer state contains non-finite values; "
+                        "starting it fresh."
+                    )
+                    self.optimizer.state.clear()
                 for state in self.optimizer.state.values():
                     for key, value in state.items():
                         if torch.is_tensor(value):
@@ -634,6 +665,68 @@ class Trainer:
         self.last_loss = loss
         self.last_lr = float(lr)
         self.last_metric_step = int(self.step)
+
+    def _log_sample(self) -> Optional[str]:
+        """Generate a short continuation of a fixed prompt for eyeballing."""
+        prompt = str(self.train_cfg.get("sample_prompt", "Einstein was a")).strip()
+        if not prompt:
+            return None
+
+        model = unwrap_model(self.model)
+        vocab_size = int(
+            getattr(model, "vocab_size", self.model_cfg.get("vocab_size", 0))
+        )
+        max_new_tokens = max(
+            1, int(self.train_cfg.get("sample_max_new_tokens", 60))
+        )
+        temperature = float(self.train_cfg.get("sample_temperature", 0.8))
+        top_k = self.train_cfg.get("sample_top_k", 50)
+        top_k = None if top_k in (None, 0) else int(top_k)
+
+        try:
+            encoder = get_encoder()
+            prompt_ids = encoder.encode(prompt)
+        except Exception as exc:
+            logging.warning("Could not tokenize sample prompt: %s", exc)
+            return None
+        if not prompt_ids:
+            return None
+        if max(prompt_ids) >= vocab_size:
+            logging.warning(
+                "Sample prompt %r uses token ids outside model vocab_size=%d; "
+                "skipping sample.",
+                prompt,
+                vocab_size,
+            )
+            return None
+
+        idx = torch.tensor([prompt_ids], dtype=torch.long, device=self.device)
+        try:
+            # fork_rng keeps sampling from changing dropout/training RNG.
+            devices = (
+                [self.device.index]
+                if self.device.type == "cuda" and self.device.index is not None
+                else []
+            )
+            with torch.random.fork_rng(devices=devices):
+                out = model.generate(
+                    idx,
+                    max_new_tokens=max_new_tokens,
+                    temperature=temperature,
+                    top_k=top_k,
+                    use_cache=True,
+                )
+            continuation = encoder.decode(out[0, len(prompt_ids) :].tolist())
+        except Exception as exc:
+            logging.warning("Sample generation failed at step %d: %s", self.step, exc)
+            return None
+        finally:
+            model.clear_cache()
+
+        text = " ".join((prompt + continuation).split())
+        self.last_sample_text = text
+        logging.info("sample @ step %d | %s", self.step, text[:400])
+        return text
 
     def _plot_metrics(self) -> list[Path]:
         if len(self.history) < 2:
@@ -855,6 +948,18 @@ class Trainer:
 
     # -- checkpoint saving --------------------------------------------------
     def save_checkpoint(self) -> bool:
+        model_state = unwrap_model(self.model).state_dict()
+        bad_tensors = self._nonfinite_tensors(model_state)
+        if bad_tensors:
+            logging.warning(
+                "Refusing to save checkpoint at step %d: model weights are "
+                "non-finite in %s. Training diverged; restart from a finite "
+                "checkpoint or lower learning_rate.",
+                self.step,
+                ", ".join(bad_tensors),
+            )
+            return False
+
         # Make sure the checkpoint includes a metric point for the latest step,
         # even if that step was not a multiple of log_interval.
         if self.last_loss is not None and self.last_metric_step != self.step:
@@ -862,7 +967,7 @@ class Trainer:
 
         state = {
             "format_version": 1,
-            "model": unwrap_model(self.model).state_dict(),
+            "model": model_state,
             "step": self.step,
             "tokens_seen": self.tokens_seen,
             "model_config": self.model_cfg,
@@ -911,7 +1016,9 @@ class Trainer:
         if max_steps is not None:
             max_steps = int(max_steps)
         grad_accum = max(1, int(cfg.get("grad_accum_steps", 1)))
-        log_interval = max(1, int(cfg.get("log_interval", 10)))
+        log_first_steps = max(0, int(cfg.get("log_first_steps", 10) or 0))
+        log_interval = max(1, int(cfg.get("log_interval", 100) or 100))
+        sample_interval = max(0, int(cfg.get("sample_interval", 1000) or 0))
         grad_clip = float(cfg.get("grad_clip", 1.0))
         show_progress = bool(cfg.get("progress", True))
 
@@ -944,6 +1051,8 @@ class Trainer:
         )
         last_log_time = time.monotonic()
         last_log_tokens = self.tokens_seen
+        self.nonfinite_streak = 0
+        failed = False
 
         try:
             while max_steps is None or self.step < max_steps:
@@ -987,25 +1096,49 @@ class Trainer:
                 if not micro_losses:
                     break
 
+                loss_value = float(torch.stack(micro_losses).mean().item())
+                loss_finite = math.isfinite(loss_value)
+
                 self.scaler.unscale_(self.optimizer)
+                grad_norm_value: Optional[float] = None
+                grads_finite = True
                 if grad_clip > 0:
-                    torch.nn.utils.clip_grad_norm_(
+                    grad_norm = torch.nn.utils.clip_grad_norm_(
                         self.model.parameters(), grad_clip
                     )
+                    grad_norm_value = float(grad_norm)
+                    grads_finite = math.isfinite(grad_norm_value)
 
                 lr = lr_for_step(self.step, cfg)
                 for group in self.optimizer.param_groups:
                     group["lr"] = lr
 
-                self.scaler.step(self.optimizer)
+                if loss_finite and (grads_finite or self.scaler.is_enabled()):
+                    # An enabled GradScaler skips the optimizer step itself
+                    # when unscale_ observed inf/nan gradients.
+                    self.scaler.step(self.optimizer)
                 self.scaler.update()
                 self.optimizer.zero_grad(set_to_none=True)
 
                 self.step += 1
                 self.tokens_seen += step_tokens
-                loss_value = torch.stack(micro_losses).mean().item()
-                self.last_loss = float(loss_value)
-                self.last_lr = float(lr)
+                updated = loss_finite and grads_finite
+
+                if updated:
+                    self.nonfinite_streak = 0
+                    self.last_loss = loss_value
+                    self.last_lr = float(lr)
+                else:
+                    self.nonfinite_streak += 1
+                    logging.warning(
+                        "step %d: skipped optimizer update because the loss or "
+                        "gradients were non-finite (loss=%s, grad_norm=%s); "
+                        "%d consecutive skip(s).",
+                        self.step,
+                        loss_value,
+                        "n/a" if grad_norm_value is None else grad_norm_value,
+                        self.nonfinite_streak,
+                    )
                 pbar.update(1)
 
                 now = time.monotonic()
@@ -1013,14 +1146,20 @@ class Trainer:
                 tok_s = (self.tokens_seen - last_log_tokens) / elapsed
                 ppl = (
                     math.exp(min(loss_value, 50.0))
-                    if math.isfinite(loss_value)
+                    if loss_finite
                     else float("nan")
                 )
+                if not math.isfinite(ppl):
+                    ppl_text = "nan"
+                elif ppl < 1e6:
+                    ppl_text = f"{ppl:,.1f}"
+                else:
+                    ppl_text = f"{ppl:.2e}"
                 # Update the bar every step so tokens_seen and loss visibly
-                # move; only record/log metrics at log_interval.
+                # move; only record/log metrics at the configured intervals.
                 postfix = {
                     "loss": f"{loss_value:.4f}",
-                    "ppl": f"{ppl:,.1f}",
+                    "ppl": ppl_text,
                     "tokens": f"{self.tokens_seen:,}",
                     "lr": f"{lr:.2e}",
                     "tok_s": f"{tok_s:,.1f}",
@@ -1033,20 +1172,36 @@ class Trainer:
                     )
                     postfix["remaining_h"] = f"{remaining / 3600:.2f}"
                 pbar.set_postfix(postfix)
-                if self.step == 1 or self.step % log_interval == 0:
+                # Log every step only during the first few steps, then every
+                # log_interval steps, so long runs do not flood the output.
+                if (
+                    self.step <= log_first_steps
+                    or self.step % log_interval == 0
+                ) and loss_finite:
                     self._record_metric(loss_value, lr)
                     logging.info(
-                        "step %d | tokens_seen %s | loss %.4f | ppl %.1f | "
+                        "step %d | tokens_seen %s | loss %.4f | ppl %s | "
                         "lr %.2e | tok/s %.1f",
                         self.step,
                         f"{self.tokens_seen:,}",
                         loss_value,
-                        ppl,
+                        ppl_text,
                         lr,
                         tok_s,
                     )
                     last_log_time = now
                     last_log_tokens = self.tokens_seen
+
+                if sample_interval > 0 and self.step % sample_interval == 0:
+                    self._log_sample()
+
+                if self.nonfinite_streak >= 5:
+                    raise RuntimeError(
+                        "Training produced non-finite loss/gradients for 5 "
+                        "consecutive steps; stopping without overwriting the "
+                        "checkpoint. Restart from a finite checkpoint and/or "
+                        "lower learning_rate in configs/pretrain.yaml."
+                    )
 
                 time_up = (
                     self.max_train_seconds is not None
@@ -1078,9 +1233,13 @@ class Trainer:
         except KeyboardInterrupt:
             logging.info("KeyboardInterrupt: saving checkpoint before exit.")
             raise
+        except Exception:
+            # Do not save a checkpoint after a crash (e.g. persistent NaN).
+            failed = True
+            raise
         finally:
             pbar.close()
-            if self.step > 0:
+            if self.step > 0 and not failed:
                 self.save_checkpoint()
 
 
@@ -1153,6 +1312,13 @@ def run_training(
     logging.info(
         "Local metrics/plots: %s",
         resolve_path(pretrain_cfg.get("out_dir", "out")),
+    )
+    logging.info(
+        "Logging: first %d steps every step, then every %d steps; "
+        "sample generation every %d steps.",
+        int(pretrain_cfg.get("log_first_steps", 10) or 0),
+        int(pretrain_cfg.get("log_interval", 100) or 100),
+        int(pretrain_cfg.get("sample_interval", 1000) or 0),
     )
     if hf_cfg:
         logging.info(

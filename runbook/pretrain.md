@@ -171,12 +171,21 @@ Checkpoint: every 60.0 min to /kaggle/working/minilllm/checkpoints
 HF sync: enabled
 Local metrics/plots: /kaggle/working/minilllm/out
 HF metrics/plots: sddfhy546y/minillm/out
-step 10 | tokens_seen 10,240 | loss 10.4xxx | ppl 33,xxx | lr ...
+Logging: first 10 steps every step, then every 100 steps; sample generation every 1000 steps.
+step 1 | tokens_seen 1,024 | loss 10.9xxx | ppl 48,xxx | lr 1.50e-06 | tok/s ...
+...
+step 100 | tokens_seen 102,400 | loss 9.8xxx | ppl 18,xxx | lr ...
+sample @ step 1000 | Einstein was a ...
 ```
 
 The `tqdm.auto` progress bar updates `tokens`, `loss`, `ppl`, `lr`, and
-`tok/s` every step. Loss is noisy step-to-step; the trend is what matters,
-and the plots include a smoothed line.
+`tok/s` every step. INFO lines are only printed for the first
+`log_first_steps` steps (default 10) and then every `log_interval` steps
+(default 100), so a long run does not flood the output. Every
+`sample_interval` steps (default 1000) the script generates a short
+continuation of `sample_prompt` and logs it, which is the easiest way to
+eyeball whether the model is improving. Loss is noisy step-to-step; the
+trend is what matters, and the plots include a smoothed line.
 
 ---
 
@@ -188,10 +197,12 @@ Repeat sections 2–4, then run the same command:
 main([])
 ```
 
-On startup the script downloads `minillm_latest.pt` from the HF repo if it
-exists, otherwise it uses the local checkpoint. It restores model weights,
-optimizer state, step, token count, RNG state, and the metrics history used
-by the plots.
+On startup the script uses `checkpoints/minillm_latest.pt` if it is present
+and valid, and only then falls back to downloading `minillm_latest.pt` from
+the HF repo. This prevents a bad remote upload from overwriting a good local
+checkpoint. Checkpoints containing NaN/Inf weights are rejected. It restores
+model weights, optimizer state, step, token count, RNG state, and the metrics
+history used by the plots.
 
 The data stream restarts from the beginning of OpenWebText; exact dataset
 position is not persisted. With a shuffled stream this is acceptable for
@@ -237,7 +248,7 @@ reached. If your Kaggle session often dies before one hour, change
 | `emb_dim` | `768` | Hidden width. | Must be divisible by `n_heads`. Reducing it makes the model much smaller/faster. |
 | `n_heads` | `12` | Attention heads. | Must divide `emb_dim`. |
 | `n_layers` | `9` | Transformer blocks. | Reducing it makes the model smaller/faster. |
-| `drop_rate` | `0.0` | Dropout probability. | `0.0` for pretraining is fine. |
+| `drop_rate` | `0.1` | Dropout probability. | `0.0`–`0.1` is normal for pretraining. |
 | `qkv_bias` | `false` | Bias in Q/K/V projections. | Keep unless matching a specific checkpoint. |
 | `tie_weights` | `true` | Share token embedding and output projection. | Keep `true`; saves ~19M parameters. |
 
@@ -288,7 +299,18 @@ Leave `vocab_size: 50257` and `tie_weights: true`.
 | `warmup_steps` | `200` | Linear warmup steps. |
 | `weight_decay` | `0.1` | AdamW weight decay. |
 | `betas` | `[0.9, 0.95]` | AdamW momentum betas. |
-| `log_interval` | `10` | How often the metrics point and INFO log line are written. Lower for denser plots. |
+| `log_first_steps` | `10` | Log every step for the first N steps. |
+| `log_interval` | `100` | After that, write a metrics point and INFO line every N steps. Lower for denser plots. |
+
+### Sample generations
+
+| Key | Current | Meaning / simple change |
+| --- | --- | --- |
+| `sample_interval` | `1000` | Generate a sample every N steps. `0` disables it. |
+| `sample_prompt` | `"Einstein was a"` | Fixed prompt used for the sample. |
+| `sample_max_new_tokens` | `60` | Continuation length. Longer is slower at each sample. |
+| `sample_temperature` | `0.8` | `0.0` = greedy. |
+| `sample_top_k` | `50` | `null`/`0` disables top-k filtering. |
 
 ### Checkpoints / outputs
 
@@ -334,6 +356,9 @@ To disable HF entirely for a run, pass `--no-hf` rather than editing the file.
 | Smaller model | `emb_dim: 256`, `n_heads: 4`, `n_layers: 4` (keep `vocab_size: 50257`) |
 | Save more often | `checkpoint_interval_minutes: 10` |
 | Denser plots | `log_interval: 1` or `2` |
+| Sample more often | `sample_interval: 500` |
+| Change the sample prompt | `sample_prompt: "The meaning of life is"` |
+| Disable samples | `sample_interval: 0` |
 | One GPU | CLI: `main(["--device", "cuda", "--num-gpus", "1"])` |
 | No HF upload | CLI: add `--no-hf` |
 | Fresh run from scratch | Remove local `checkpoints/minillm_latest.pt` and delete/rename the HF `minillm_latest.pt` |
@@ -385,6 +410,8 @@ is unchanged.
 | `HF repo_id is empty` | Use `configs/pretrain.yaml` from this repo; it already contains `sddfhy546y/minillm`. |
 | `HF repo ... not found` | Check the repo id and token permissions. |
 | `CUDA out of memory` | Lower `batch_size`, lower `context_length`, or raise `grad_accum_steps`. |
+| `loss nan` / `ppl nan` | Model diverged. Pull the latest code (GPT-2 init + bad-step skipping), delete the NaN `minillm_latest.pt` locally and on HF, then restart. If it repeats, lower `learning_rate`. |
+| `Refusing to save checkpoint ... non-finite` | Same as above: the trainer will not overwrite the good checkpoint with NaN weights. |
 | `sequence length ... exceeds context_length` | Ensure `data.block_size <= model.context_length`. |
 | Checkpoint config mismatch | You changed `configs/model.yaml`; start fresh or restore the old architecture. |
 | First batch is slow | Normal; OpenWebText streaming fetches a shard. |

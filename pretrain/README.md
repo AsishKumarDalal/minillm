@@ -102,6 +102,32 @@ Disable all HuggingFace download/upload:
 .venv/bin/python -m pretrain.train --no-hf
 ```
 
+### Logging and sample generations
+
+By default the run logs every step for the first 10 steps, then only every
+100 steps, so a multi-hour log stays readable. Every 1000 steps it also
+generates a short continuation of `sample_prompt` (default
+`"Einstein was a"`) and writes it to the log, for example:
+
+```text
+sample @ step 1000 | Einstein was a German-born theoretical physicist ...
+```
+
+All four values live in `configs/pretrain.yaml`:
+
+```yaml
+log_first_steps: 10
+log_interval: 100
+sample_interval: 1000
+sample_prompt: "Einstein was a"
+sample_max_new_tokens: 60
+sample_temperature: 0.8
+sample_top_k: 50
+```
+
+Set `sample_interval: 0` to disable sampling. tqdm still updates every step;
+only the INFO lines (and metric points) are sparse.
+
 Change the checkpoint directory or batch size from the CLI:
 
 ```bash
@@ -158,12 +184,19 @@ on `Ctrl+C`, and when the `--hours` time limit is reached, the script:
    optimizer checkpoint is large; set `save_optimizer: false` for smaller
    uploads if a fresh optimizer on resume is acceptable.
 
+Non-finite (NaN/Inf) checkpoints are never saved or resumed. If the loss
+starts printing `nan`, the trainer skips the bad update, aborts after five
+consecutive failures without overwriting the checkpoint, and asks you to
+restart from a finite checkpoint with a lower `learning_rate`.
+
 On startup it:
 
-1. Looks for `minillm_latest.pt` in the configured HF repo and downloads it.
-2. Falls back to the local `checkpoints/minillm_latest.pt` if the remote is
-   unavailable or HF sync is disabled.
-3. Checks the saved model architecture against `configs/model.yaml`.
+1. Tries the local `checkpoints/minillm_latest.pt` first, so a remote upload
+   can never overwrite a good local checkpoint with a bad one.
+2. Falls back to downloading `minillm_latest.pt` from the configured HF repo
+   when the local checkpoint is missing or unusable.
+3. Checks the saved model architecture against `configs/model.yaml` and
+   rejects checkpoints containing NaN/Inf weights.
 4. Restores model, optimizer, step, token count, scaler, RNG state, and the
    metrics history used for the plots.
 5. Starts from scratch with a warning if no usable checkpoint exists.

@@ -4,6 +4,10 @@ A dense GPT language model trained from scratch on streaming OpenWebText.
 The training script auto-selects 2 GPUs, 1 GPU, or CPU, saves checkpoints and
 training plots every hour, and syncs them to HuggingFace Hub.
 
+Logging is sparse after the first 10 steps (every 100 steps), and every 1000
+steps the model generates a short continuation of a fixed prompt so you can
+see whether it is improving.
+
 ## Quick start
 
 ```bash

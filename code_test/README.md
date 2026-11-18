@@ -44,9 +44,13 @@ Run the tiny end-to-end training test (CPU, synthetic data, no network):
 This checks:
 
 - tiny model forward/backward and optimizer steps
+- GPT-2 initialization keeps the initial loss near `ln(vocab_size)`
 - gradient accumulation
+- sparse logging schedule (first N steps, then every `log_interval`)
+- periodic sample generation from `sample_prompt`
 - linear warmup + cosine LR schedule
 - local checkpoint save/resume (model, optimizer, step, tokens)
+- rejection of NaN checkpoints and refusal to save NaN weights
 - wall-clock time limit stops training and saves/uploads the final checkpoint
 - metrics history restore and loss/perplexity decreasing as tokens increase
 - local `out/metrics.json` plus loss, perplexity, and combined plots

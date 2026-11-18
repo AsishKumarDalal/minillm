@@ -59,7 +59,9 @@ TRAIN_CFG = {
     "weight_decay": 0.01,
     "betas": [0.9, 0.95],
     "grad_clip": 1.0,
+    "log_first_steps": 10,
     "log_interval": 1,
+    "sample_interval": 0,
     "checkpoint_interval_minutes": 60,
     "checkpoint_dir": "",
     "save_optimizer": True,
@@ -139,6 +141,14 @@ def test_tiny_train_and_resume(tmpdir: str) -> None:
     assert n_params < 100_000, n_params
     print(f"tiny model: {n_params:,} parameters")
 
+    # Regression guard for GPT-2 init: a fresh model must start near
+    # ln(vocab_size), not with explosive logits/loss.
+    with torch.no_grad():
+        x0 = torch.randint(0, MODEL_CFG["vocab_size"], (1, 8))
+        y0 = torch.randint(0, MODEL_CFG["vocab_size"], (1, 8))
+        _, initial_loss = model(x0, y0)
+    assert initial_loss.item() < 20.0, initial_loss.item()
+
     trainer = build_trainer(tmpdir, max_steps=3)
     assert not trainer.resume(), "should start fresh with an empty checkpoint dir"
     trainer.train(make_batches(num_steps=3, seed=0))
@@ -200,6 +210,99 @@ def test_grad_accumulation(tmpdir: str) -> None:
     assert trainer.step == 1, trainer.step
     assert trainer.tokens_seen == 2 * 2 * 8, trainer.tokens_seen
     print("gradient accumulation OK")
+
+
+def test_sparse_log_schedule(tmpdir: str) -> None:
+    cfg = dict(TRAIN_CFG)
+    cfg.update(
+        {
+            "checkpoint_dir": str(Path(tmpdir) / "checkpoints"),
+            "out_dir": str(Path(tmpdir) / "out"),
+            "max_steps": 25,
+            "log_first_steps": 3,
+            "log_interval": 10,
+            "sample_interval": 0,
+            "progress": False,
+        }
+    )
+    device, _ = select_device(cfg)
+    model = GPT(MODEL_CFG)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=cfg["learning_rate"])
+    trainer = Trainer(
+        model=model,
+        optimizer=optimizer,
+        device=device,
+        model_cfg=MODEL_CFG,
+        train_cfg=cfg,
+        hf_cfg=None,
+    )
+    trainer.train(make_batches(num_steps=25, seed=11))
+
+    # First 3 steps, then every 10; the final save adds the last step.
+    steps = [point["step"] for point in trainer.history]
+    assert steps == [1, 2, 3, 10, 20, 25], steps
+    print(f"sparse log schedule OK: {steps}")
+
+
+def test_sample_generation(tmpdir: str) -> None:
+    cfg = dict(TRAIN_CFG)
+    cfg.update(
+        {
+            "checkpoint_dir": str(Path(tmpdir) / "checkpoints"),
+            "out_dir": str(Path(tmpdir) / "out"),
+            "max_steps": 2,
+            "log_first_steps": 0,
+            "log_interval": 100,
+            "sample_interval": 1,
+            "sample_prompt": "A",  # token id 32, inside the tiny vocab
+            "sample_max_new_tokens": 2,
+            "sample_temperature": 0.0,
+            "sample_top_k": None,
+            "progress": False,
+        }
+    )
+    device, _ = select_device(cfg)
+    model = GPT(MODEL_CFG)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=cfg["learning_rate"])
+    trainer = Trainer(
+        model=model,
+        optimizer=optimizer,
+        device=device,
+        model_cfg=MODEL_CFG,
+        train_cfg=cfg,
+        hf_cfg=None,
+    )
+    trainer.train(make_batches(num_steps=2, seed=3))
+    assert trainer.last_sample_text is not None
+    assert trainer.last_sample_text.startswith("A"), trainer.last_sample_text
+    print(f"sample generation OK: {trainer.last_sample_text!r}")
+
+
+def test_resume_rejects_nonfinite_checkpoint(tmpdir: str) -> None:
+    trainer = build_trainer(tmpdir, max_steps=3)
+
+    state = {
+        "format_version": 1,
+        "model": {
+            name: tensor.clone()
+            for name, tensor in trainer.model.state_dict().items()
+        },
+        "step": 10,
+        "tokens_seen": 100,
+        "model_config": dict(MODEL_CFG),
+        "metrics_history": [],
+    }
+    first = next(iter(state["model"].values()))
+    first.view(-1)[0] = float("nan")
+    torch.save(state, trainer.checkpoint_path)
+
+    assert not trainer.resume(), "NaN checkpoint must be rejected"
+
+    # Saving NaN weights must be refused as well.
+    with torch.no_grad():
+        next(trainer.model.parameters()).view(-1)[0] = float("nan")
+    assert not trainer.save_checkpoint(), "NaN weights must not be saved"
+    print("non-finite checkpoint reject + save guard OK")
 
 
 def test_loss_and_perplexity_decrease(tmpdir: str) -> None:
@@ -485,6 +588,12 @@ def main() -> None:
         test_run_training_end_to_end(tmpdir)
     with tempfile.TemporaryDirectory() as tmpdir:
         test_grad_accumulation(tmpdir)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        test_sparse_log_schedule(tmpdir)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        test_sample_generation(tmpdir)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        test_resume_rejects_nonfinite_checkpoint(tmpdir)
     with tempfile.TemporaryDirectory() as tmpdir:
         test_loss_and_perplexity_decrease(tmpdir)
     with tempfile.TemporaryDirectory() as tmpdir:

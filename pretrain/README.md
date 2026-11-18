@@ -123,10 +123,10 @@ from a random model, and never download from or upload to HF:
 By default the run logs every step for the first 10 steps, then only every
 100 steps, so a multi-hour log stays readable. Every 1000 steps it also
 generates a short continuation of `sample_prompt` (default
-`"Einstein was a"`) and writes it to the log, for example:
+`"Albert Einstein is a"`) and writes it to the log, for example:
 
 ```text
-sample @ step 1000 | Einstein was a German-born theoretical physicist ...
+sample @ step 1000 | Albert Einstein is a German-born theoretical physicist ...
 ```
 
 All four values live in `configs/pretrain.yaml`:
@@ -135,7 +135,7 @@ All four values live in `configs/pretrain.yaml`:
 log_first_steps: 10
 log_interval: 100
 sample_interval: 1000
-sample_prompt: "Einstein was a"
+sample_prompt: "Albert Einstein is a"
 sample_max_new_tokens: 60
 sample_temperature: 0.8
 sample_top_k: 50
@@ -177,10 +177,14 @@ The bar always shows a percentage when there is a target:
 - neither set → percentage of the time until the next checkpoint save,
   resetting after every save. This is the normal open-ended pretraining mode.
 
-The suffix shows `step`, `tokens`, `loss`, `ppl`, `lr`, and `tok/s` every
-step. When time-based, it also shows `remaining_h` (with `max_hours`) or
-`save_in` (minutes until the next save). HTTP range-request/dataset INFO
-chatter from `httpx` and `datasets` is silenced; warnings still appear.
+The suffix shows `step`, `t/s`, `tokens`, `ppl`, and `loss` every step
+(the four training metrics stay visible in one line). When time-based, it
+also shows `remaining_h` (with `max_hours`) or `save_in` (minutes until the
+next save). The bar is created once and keeps running; sample generations
+are written above it with `tqdm.write`, so a step-1000 sample does not
+restart or replace the bar. The bar is green in terminals and in Jupyter.
+HTTP range-request/dataset INFO chatter from `httpx` and `datasets` is
+silenced; warnings still appear.
 
 In a notebook, pass an explicit argument list so argparse does not try to
 parse kernel arguments such as `-f`:

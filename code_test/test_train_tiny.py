@@ -292,9 +292,11 @@ def test_progress_bar_percentage(tmpdir: str) -> None:
             self.unit = unit
             self.n = initial
             self.postfix = {}
+            self.writes = []
             self.resets = 0
             self.closed = False
             self.bar_format = kwargs.get("bar_format", "")
+            self.colour = kwargs.get("colour")
             bars.append(self)
 
         def update(self, n=1.0):
@@ -303,6 +305,12 @@ def test_progress_bar_percentage(tmpdir: str) -> None:
         def set_postfix(self, postfix=None, **kwargs):
             self.postfix = dict(postfix or {})
             self.postfix.update(kwargs)
+
+        def set_postfix_str(self, s="", refresh=True):
+            self.postfix = str(s)
+
+        def write(self, s, end="\n", **kwargs):
+            self.writes.append(str(s))
 
         def set_description(self, desc):
             self.desc = desc
@@ -354,7 +362,9 @@ def test_progress_bar_percentage(tmpdir: str) -> None:
         assert bar.n == 2, bar.n
         assert "{percentage" in bar.bar_format, bar.bar_format
         assert "{postfix}" in bar.bar_format, bar.bar_format
-        assert "step" in bar.postfix, bar.postfix
+        assert bar.colour == "green", bar.colour
+        for field in ("step", "t/s", "tokens", "ppl", "loss"):
+            assert field in bar.postfix, (field, bar.postfix)
 
         run_case(
             "hours",
@@ -364,7 +374,7 @@ def test_progress_bar_percentage(tmpdir: str) -> None:
         assert bar.total == 3600.0 and bar.unit == "s", (bar.total, bar.unit)
         assert "time budget" in bar.desc, bar.desc
         assert bar.n > 0, bar.n
-        assert "step" in bar.postfix and "remaining_h" in bar.postfix, bar.postfix
+        assert "step" in bar.postfix and "remaining" in bar.postfix, bar.postfix
 
         run_case(
             "save",
@@ -385,9 +395,26 @@ def test_progress_bar_percentage(tmpdir: str) -> None:
         )
         bar = bars[-1]
         assert bar.resets >= 1, "bar must reset after a periodic checkpoint save"
+
+        before = len(bars)
+        run_case(
+            "sample-bar",
+            {
+                "max_steps": 3,
+                "max_hours": None,
+                "sample_interval": 1,
+                "sample_prompt": "A",
+                "sample_max_new_tokens": 2,
+            },
+            num_batches=3,
+        )
+        bar = bars[-1]
+        assert len(bars) - before == 1, "sample generation must not create a new bar"
+        assert len(bar.writes) == 3, bar.writes
+        assert all("sample @ step" in message for message in bar.writes), bar.writes
     finally:
         train_mod.tqdm = original
-    print("progress bar percentage modes + reset OK")
+    print("progress bar percentage modes + single bar with samples OK")
 
 
 def test_resume_rejects_nonfinite_checkpoint(tmpdir: str) -> None:

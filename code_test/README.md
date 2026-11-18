@@ -48,6 +48,7 @@ This checks:
 - gradient accumulation
 - sparse logging schedule (first N steps, then every `log_interval`)
 - tqdm percentage modes (`max_steps`, `max_hours`, next checkpoint)
+- one continuous green bar with `t/s`, tokens, ppl, loss; samples written above it
 - periodic sample generation from `sample_prompt`
 - `--new` starts fresh but keeps HF sync; `--no-hf` starts fresh with no HF
 - linear warmup + cosine LR schedule

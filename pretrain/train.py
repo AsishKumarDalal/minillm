@@ -699,9 +699,11 @@ class Trainer:
         self.last_lr = float(lr)
         self.last_metric_step = int(self.step)
 
-    def _log_sample(self) -> Optional[str]:
+    def _log_sample(self, pbar=None) -> Optional[str]:
         """Generate a short continuation of a fixed prompt for eyeballing."""
-        prompt = str(self.train_cfg.get("sample_prompt", "Einstein was a")).strip()
+        prompt = str(
+            self.train_cfg.get("sample_prompt", "Albert Einstein is a")
+        ).strip()
         if not prompt:
             return None
 
@@ -741,7 +743,7 @@ class Trainer:
                 if self.device.type == "cuda" and self.device.index is not None
                 else []
             )
-            with torch.random.fork_rng(devices=devices):
+            with torch.no_grad(), torch.random.fork_rng(devices=devices):
                 out = model.generate(
                     idx,
                     max_new_tokens=max_new_tokens,
@@ -758,7 +760,13 @@ class Trainer:
 
         text = " ".join((prompt + continuation).split())
         self.last_sample_text = text
-        logging.info("sample @ step %d | %s", self.step, text[:400])
+        message = f"sample @ step {self.step:,} | {text[:400]}"
+        if pbar is not None:
+            # Write above the live bar instead of logging a new line, which
+            # would make Jupyter look like it restarted the progress bar.
+            pbar.write(message)
+        else:
+            logging.info("%s", message)
         return text
 
     def _plot_metrics(self) -> list[Path]:
@@ -1119,10 +1127,17 @@ class Trainer:
             dynamic_ncols=True,
             disable=not show_progress,
             postfix="",
+            colour="green",
             # A clean percentage bar; the default time-based bar would print
             # awkward values like "5.386/3600.0 s" and "1.00 s/s".
-            bar_format="{desc}: {percentage:3.0f}%|{bar:20}|{postfix}",
+            bar_format="{desc}: {percentage:3.0f}%|{bar:20}{postfix}",
         )
+        if show_progress:
+            try:
+                # tqdm.notebook draws an ipywidgets IntProgress; success=green.
+                pbar.container.children[1].bar_style = "success"
+            except Exception:
+                pass
         pbar_last_time = now
         last_log_time = time.monotonic()
         last_log_tokens = self.tokens_seen
@@ -1236,29 +1251,28 @@ class Trainer:
                     ppl_text = f"{ppl:.2e}"
                 # Update the bar every step so tokens_seen and loss visibly
                 # move; only record/log metrics at the configured intervals.
-                postfix = {
-                    "step": f"{self.step:,}",
-                    "loss": f"{loss_value:.4f}",
-                    "ppl": ppl_text,
-                    "tokens": f"{self.tokens_seen:,}",
-                    "lr": f"{lr:.2e}",
-                    "tok_s": f"{tok_s:,.1f}",
-                }
+                # Keep the four requested metrics visible on one continuous
+                # bar: throughput, tokens seen, perplexity, and loss.
+                postfix = (
+                    f"step {self.step:,} | t/s {tok_s:,.1f} | "
+                    f"tokens {self.tokens_seen:,} | ppl {ppl_text} | "
+                    f"loss {loss_value:.4f}"
+                )
                 if self.max_train_seconds is not None:
                     remaining = max(
                         0.0,
                         self.max_train_seconds
                         - (now - self.train_start_time),
                     )
-                    postfix["remaining_h"] = f"{remaining / 3600:.2f}"
+                    postfix += f" | remaining {remaining / 3600:.2f}h"
                 elif progress_time_based:
                     next_save = max(
                         0.0,
                         self.interval_seconds
                         - (now - self.last_checkpoint_time),
                     )
-                    postfix["save_in"] = f"{next_save / 60:.1f}m"
-                pbar.set_postfix(postfix)
+                    postfix += f" | save_in {next_save / 60:.1f}m"
+                pbar.set_postfix_str(postfix)
                 # Log every step only during the first few steps, then every
                 # log_interval steps, so long runs do not flood the output.
                 if (
@@ -1280,7 +1294,7 @@ class Trainer:
                     last_log_tokens = self.tokens_seen
 
                 if sample_interval > 0 and self.step % sample_interval == 0:
-                    self._log_sample()
+                    self._log_sample(pbar)
 
                 if self.nonfinite_streak >= 5:
                     raise RuntimeError(

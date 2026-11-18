@@ -188,15 +188,17 @@ Logging: first 10 steps every step, then every 100 steps; sample generation ever
 step 1 | tokens_seen 1,024 | loss 10.9xxx | ppl 48,xxx | lr 1.50e-06 | tok/s ...
 ...
 step 100 | tokens_seen 102,400 | loss 9.8xxx | ppl 18,xxx | lr ...
-sample @ step 1000 | Einstein was a ...
+sample @ step 1000 | Albert Einstein is a ...
 ```
 
 The `tqdm.auto` progress bar always shows a percentage when a target is
 known. With `max_steps` it tracks percent of steps; with `max_hours` it
 tracks percent of the wall-clock budget; with neither it tracks percent of
 the time until the next checkpoint save and resets after each save. The
-suffix updates `step` (when the bar is time-based), `tokens`, `loss`, `ppl`,
-`lr`, `tok/s`, and either `remaining_h` or `save_in` every step. INFO lines
+suffix updates `step`, `t/s`, `tokens`, `ppl`, `loss`, and either
+`remaining_h` or `save_in` every step. The bar is created once and keeps
+running for the whole run; the step-1000 sample is written above it, so it
+does not restart or create a second bar. INFO lines
 are only printed for the first `log_first_steps` steps (default 10) and then
 every `log_interval` steps (default 100), so a long run does not flood the
 output. HTTP range-request and dataset backend INFO chatter is suppressed;
@@ -328,7 +330,7 @@ Leave `vocab_size: 50257` and `tie_weights: true`.
 | Key | Current | Meaning / simple change |
 | --- | --- | --- |
 | `sample_interval` | `1000` | Generate a sample every N steps. `0` disables it. |
-| `sample_prompt` | `"Einstein was a"` | Fixed prompt used for the sample. |
+| `sample_prompt` | `"Albert Einstein is a"` | Fixed prompt used for the sample. |
 | `sample_max_new_tokens` | `60` | Continuation length. Longer is slower at each sample. |
 | `sample_temperature` | `0.8` | `0.0` = greedy. |
 | `sample_top_k` | `50` | `null`/`0` disables top-k filtering. |

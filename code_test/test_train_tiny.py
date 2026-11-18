@@ -391,6 +391,8 @@ def test_progress_bar_percentage(tmpdir: str) -> None:
         assert bar.n == 2, bar.n
         assert "{percentage" in bar.bar_format, bar.bar_format
         assert "{postfix}" in bar.bar_format, bar.bar_format
+        assert "{bar}" in bar.bar_format, bar.bar_format
+        assert "{bar:" not in bar.bar_format, bar.bar_format
         assert bar.colour == "green", bar.colour
         for field in ("t/s", "tok", "ppl", "loss"):
             assert field in bar.postfix, (field, bar.postfix)
@@ -403,6 +405,7 @@ def test_progress_bar_percentage(tmpdir: str) -> None:
         class FakeLayout:
             flex = None
             width = None
+            min_width = None
             overflow = None
 
         class FakeWidget:
@@ -415,13 +418,18 @@ def test_progress_bar_percentage(tmpdir: str) -> None:
         class FakeContainer:
             children = (fake_desc, fake_bar, fake_stats)
 
+            def __init__(self):
+                self.layout = FakeLayout()
+
         class FakePbar:
-            container = FakeContainer()
+            def __init__(self):
+                self.container = FakeContainer()
 
         train_mod.style_progress_bar(FakePbar())
-        assert fake_bar.layout.flex == "0 0 26%", fake_bar.layout.flex
-        assert fake_bar.layout.width == "26%", fake_bar.layout.width
+        assert fake_bar.layout.flex == "0 0 15%", fake_bar.layout.flex
+        assert fake_bar.layout.width == "15%", fake_bar.layout.width
         assert fake_stats.layout.flex == "1 1 auto", fake_stats.layout.flex
+        assert fake_stats.layout.min_width == "max-content", fake_stats.layout.min_width
         assert fake_stats.layout.overflow == "visible", fake_stats.layout.overflow
         assert fake_bar.bar_style == "success", fake_bar.bar_style
 
@@ -483,7 +491,7 @@ def test_progress_bar_percentage(tmpdir: str) -> None:
         )
         bar = bars[-1]
         assert bar.total == 1000 and bar.unit == "token", (bar.total, bar.unit)
-        assert "OpenWebText tokens" in bar.desc, bar.desc
+        assert bar.desc == "pretrain", bar.desc  # short label keeps stats visible
         assert bar.n == 48, bar.n
 
         run_case(

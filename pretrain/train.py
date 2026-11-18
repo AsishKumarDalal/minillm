@@ -287,15 +287,21 @@ def format_compact(value: float) -> str:
 
 
 def style_progress_bar(pbar) -> None:
-    """Make the notebook bar green and leave room for the stats on the right."""
+    """Make the notebook bar green and keep all stats visible beside it."""
     try:
-        _desc, bar_widget, stats_widget = pbar.container.children
-        # tqdm.notebook gives the bar flex=2, which squeezes the stats until
-        # "ppl"/"loss" are cut off. Reserve a fixed slice for the bar and let
-        # the stats use the rest of the row.
-        bar_widget.layout.flex = "0 0 26%"
-        bar_widget.layout.width = "26%"
+        desc_widget, bar_widget, stats_widget = pbar.container.children
+        # tqdm.notebook gives the bar flex=2, which squeezes the right-hand
+        # stats until "tok"/"ppl"/"loss" are clipped. Use the full row, keep
+        # the bar itself narrow, and let the stats take all remaining width
+        # without shrinking below their content.
+        pbar.container.layout.width = "100%"
+        desc_widget.layout.flex = "0 1 auto"
+        desc_widget.layout.overflow = "visible"
+        bar_widget.layout.flex = "0 0 15%"
+        bar_widget.layout.width = "15%"
+        bar_widget.layout.min_width = "60px"
         stats_widget.layout.flex = "1 1 auto"
+        stats_widget.layout.min_width = "max-content"
         stats_widget.layout.overflow = "visible"
         bar_widget.bar_style = "success"
     except Exception:
@@ -1200,7 +1206,9 @@ class Trainer:
             progress_total = float(estimated_total)
             progress_initial = min(progress_total, float(self.tokens_seen))
             progress_unit = "token"
-            progress_desc = "pretrain (OpenWebText tokens)"
+            # Keep the widget label short so the four live stats on the right
+            # are not clipped. The meaning is logged once at startup.
+            progress_desc = "pretrain"
             logging.info(
                 "Progress bar: tokens seen / estimated %s tokens "
                 "(one full OpenWebText pass).",
@@ -1232,7 +1240,11 @@ class Trainer:
             colour="green",
             # A clean percentage bar; the default time-based bar would print
             # awkward values like "5.386/3600.0 s" and "1.00 s/s".
-            bar_format="{desc}: {percentage:3.0f}%|{bar:20}{postfix}",
+            # Use {bar} (not {bar:20}): tqdm.notebook only replaces the exact
+            # {bar} token with its widget. A width-qualified {bar:20} renders
+            # an extra text bar inside the stats text, pushing t/s, tok, ppl
+            # and loss out of view in Jupyter.
+            bar_format="{desc}: {percentage:3.0f}%|{bar}|{postfix}",
         )
         if show_progress:
             style_progress_bar(pbar)

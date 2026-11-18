@@ -182,8 +182,9 @@ The bar always shows a percentage; what it measures depends on the flags
 - `max_steps` set → percentage of requested optimizer steps.
 - none of the above → `tokens_seen / estimated_total_tokens`, i.e. how far
   through one estimated full pass of OpenWebText you are. The estimate
-  (~8.97B GPT-2 BPE tokens) is in `configs/pretrain.yaml`. Desc:
-  `pretrain (OpenWebText tokens)`.
+  (~8.97B GPT-2 BPE tokens) is in `configs/pretrain.yaml`. The label stays
+  short (`pretrain`) so the stats on the right are not clipped; the meaning
+  of the percentage is logged once at startup.
 - no estimate either → percentage of the time until the next checkpoint save,
   resetting after every save.
 
@@ -197,8 +198,9 @@ The suffix shows the same four metrics every step, in a compact form:
 #81 | 5.5k t/s | 82.9k tok | ppl 13.1k | loss 9.480
 ```
 
-The notebook layout reserves 26% of the row for the bar and gives the
-remaining width to the stats, so `ppl` and `loss` are not cut off. The bar
+The notebook layout uses the full row, keeps the bar narrow (15%), and lets
+the stats take the remaining width without shrinking below their content, so
+`t/s`, `tok`, `ppl`, and `loss` stay visible. The bar
 is created once and keeps running; sample generations are written above it
 with `tqdm.write`, so a step-1000 sample does not restart or replace the
 bar. The bar is green in terminals and in Jupyter. HTTP

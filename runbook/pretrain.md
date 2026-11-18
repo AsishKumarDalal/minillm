@@ -218,8 +218,9 @@ percent of that many tokens; `max_steps` → percent of steps; otherwise
 fallback resets after every save. The
 suffix shows the compact stats `#step`, `t/s`, `tok`, `ppl`, and `loss` every
 step, e.g. `#81 | 5.5k t/s | 82.9k tok | ppl 13.1k | loss 9.480`. The
-notebook bar reserves 26% of the row for the bar so the stats, including
-`ppl` and `loss`, stay visible. The bar is created once and keeps running
+notebook bar uses the full row, keeps the bar narrow (15%), and gives the
+remaining width to the stats so `t/s`, `tok`, `ppl`, and `loss` stay visible.
+The bar is created once and keeps running
 for the whole run; the step-1000 sample is written above it, so it does not
 restart or create a second bar. Full INFO step lines are printed only for the
 first `log_first_steps` steps (default 10); after that the live bar is the

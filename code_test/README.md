@@ -48,6 +48,7 @@ This checks:
 - gradient accumulation
 - sparse logging schedule (first N steps, then every `log_interval`)
 - periodic sample generation from `sample_prompt`
+- `--new` starts fresh but keeps HF sync; `--no-hf` starts fresh with no HF
 - linear warmup + cosine LR schedule
 - local checkpoint save/resume (model, optimizer, step, tokens)
 - rejection of NaN checkpoints and refusal to save NaN weights

@@ -121,6 +121,19 @@ from pretrain.train import main
 main([])
 ```
 
+Start from a random model even if a checkpoint exists, but keep saving and
+uploading to HF:
+
+```python
+main(["--new"])
+```
+
+Start from a random model with no HuggingFace access at all:
+
+```python
+main(["--no-hf"])
+```
+
 Or from a shell cell:
 
 ```python
@@ -203,6 +216,9 @@ the HF repo. This prevents a bad remote upload from overwriting a good local
 checkpoint. Checkpoints containing NaN/Inf weights are rejected. It restores
 model weights, optimizer state, step, token count, RNG state, and the metrics
 history used by the plots.
+
+To intentionally ignore every checkpoint and start a new run, use `--new`
+(keep HF uploads) or `--no-hf` (no HF access at all).
 
 The data stream restarts from the beginning of OpenWebText; exact dataset
 position is not persisted. With a shuffled stream this is acceptable for
@@ -343,6 +359,9 @@ Leave `vocab_size: 50257` and `tie_weights: true`.
 | `hf.private` | `true` | Used when the script creates a repo. Existing repo visibility is unchanged. |
 
 To disable HF entirely for a run, pass `--no-hf` rather than editing the file.
+`--no-hf` also ignores local and HF checkpoints, so the run always starts
+from a random model. Use `--new` instead when you want a fresh model but
+still want the checkpoint and plots uploaded to HF.
 
 ---
 
@@ -361,7 +380,8 @@ To disable HF entirely for a run, pass `--no-hf` rather than editing the file.
 | Disable samples | `sample_interval: 0` |
 | One GPU | CLI: `main(["--device", "cuda", "--num-gpus", "1"])` |
 | No HF upload | CLI: add `--no-hf` |
-| Fresh run from scratch | Remove local `checkpoints/minillm_latest.pt` and delete/rename the HF `minillm_latest.pt` |
+| Fresh model, keep HF upload | CLI: add `--new` |
+| Fresh run from scratch | `--new`, or remove local `checkpoints/minillm_latest.pt` and delete/rename the HF `minillm_latest.pt` |
 | Avoid CUDA OOM | Lower `batch_size` to `4`/`2`, or raise `grad_accum_steps` |
 
 After editing YAML, rerun `main([])`; no code changes are needed.

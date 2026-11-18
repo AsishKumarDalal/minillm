@@ -14,11 +14,17 @@ Features
   config): training stops after that many hours and still saves/uploads.
 * Writes ``out/metrics.json`` and token-vs-loss / token-vs-perplexity plots
   at the same interval, then uploads them to the HF repo's ``out/`` folder.
-* On startup, downloads ``minillm_latest.pt`` from the configured HF repo
-  if it exists, then resumes model, optimizer, step, tokens, RNG state, and
-  the metrics history used by the plots.
+* On startup, resumes from ``checkpoints/minillm_latest.pt`` if it exists,
+  otherwise downloads ``minillm_latest.pt`` from the configured HF repo.
+  It restores model, optimizer, step, tokens, RNG state, and the metrics
+  history used by the plots.
+* ``--new`` ignores both local and HF checkpoints and starts from a random
+  model, but still saves locally and uploads checkpoints/plots to HF.
+* ``--no-hf`` ignores both local and HF checkpoints and disables all HF
+  download/upload, so the run never pulls from or pushes to HF.
 * If the HF repo or token is missing, logs a warning and disables remote
-  sync; it still resumes from a local checkpoint when one is present.
+  sync; it still resumes from a local checkpoint when one is present
+  (unless ``--new`` or ``--no-hf`` was passed).
 
 Config
 ------
@@ -36,7 +42,11 @@ Usage
     # Force CPU or limit steps
     .venv/bin/python -m pretrain.train --device cpu --max-steps 10
 
-    # Disable HF upload/resume
+    # Ignore local and HF checkpoints and start from a random model.
+    # Training still saves and uploads to HF.
+    .venv/bin/python -m pretrain.train --new
+
+    # Fresh local-only run: ignore local and HF checkpoints, never upload.
     .venv/bin/python -m pretrain.train --no-hf
 
     # Stop after 12 hours and save/upload the final checkpoint
@@ -1250,6 +1260,7 @@ def run_training(
     pretrain_cfg: dict,
     model_cfg: dict,
     no_hf: bool = False,
+    new_run: bool = False,
 ) -> None:
     load_env_file(ROOT_DIR / ".env")
 
@@ -1335,7 +1346,15 @@ def run_training(
         train_cfg=pretrain_cfg,
         hf_cfg=hf_cfg,
     )
-    trainer.resume()
+    if new_run or no_hf:
+        reason = "--new" if new_run and not no_hf else "--no-hf"
+        logging.warning(
+            "Starting from a random model (%s): local and HF checkpoints "
+            "are ignored.",
+            reason,
+        )
+    else:
+        trainer.resume()
 
     logging.info(
         "Streaming %s/%s with shuffle_buffer=%d.",
@@ -1389,9 +1408,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--num-gpus", type=int, default=None)
     parser.add_argument("--checkpoint-dir", type=str, default=None)
     parser.add_argument(
+        "--new",
+        action="store_true",
+        help="Ignore local and HF checkpoints and start from a random model. "
+             "Training still saves locally and uploads to HF.",
+    )
+    parser.add_argument(
         "--no-hf",
         action="store_true",
-        help="Disable HF checkpoint download/upload.",
+        help="Start from a random model (ignore local and HF checkpoints) "
+             "and disable all HF download/upload.",
     )
     return parser
 
@@ -1417,7 +1443,12 @@ def main(argv: Optional[list[str]] = None) -> None:
         pretrain_cfg["checkpoint_dir"] = args.checkpoint_dir
 
     try:
-        run_training(pretrain_cfg, model_cfg, no_hf=args.no_hf)
+        run_training(
+            pretrain_cfg,
+            model_cfg,
+            no_hf=args.no_hf,
+            new_run=args.new,
+        )
     except KeyboardInterrupt:
         logging.info("Training interrupted by user.")
 

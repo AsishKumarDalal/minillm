@@ -96,11 +96,27 @@ plots are still saved/uploaded:
 `--hours` is an alias for `--max-hours`. You can also set `max_hours: 6` in
 `configs/pretrain.yaml`.
 
-Disable all HuggingFace download/upload:
+Start a brand-new run from a random model, ignoring both the local and the
+HuggingFace checkpoint. Checkpoints and plots are still saved locally and
+uploaded to HF:
+
+```bash
+.venv/bin/python -m pretrain.train --new
+```
+
+Run completely without HuggingFace: ignore local and HF checkpoints, start
+from a random model, and never download from or upload to HF:
 
 ```bash
 .venv/bin/python -m pretrain.train --no-hf
 ```
+
+| Flags | Uses local checkpoint | Uses HF checkpoint | Uploads to HF |
+| --- | --- | --- | --- |
+| *(none)* | yes | yes (if local is missing) | yes |
+| `--new` | no | no | yes |
+| `--no-hf` | no | no | no |
+| `--new --no-hf` | no | no | no |
 
 ### Logging and sample generations
 
@@ -200,6 +216,10 @@ On startup it:
 4. Restores model, optimizer, step, token count, scaler, RNG state, and the
    metrics history used for the plots.
 5. Starts from scratch with a warning if no usable checkpoint exists.
+
+Pass `--new` to skip those steps and start from a random model while still
+saving and uploading to HF. Pass `--no-hf` to start from a random model and
+disable all HF download/upload.
 
 The data stream itself restarts from the beginning of OpenWebText on resume;
 token position is not persisted. With a shuffled stream this is usually

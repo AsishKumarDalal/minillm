@@ -581,11 +581,95 @@ def test_run_training_end_to_end(tmpdir: str) -> None:
     print("run_training end-to-end tiny OK")
 
 
+def test_new_and_no_hf_flags(tmpdir: str) -> None:
+    """--new keeps HF sync but ignores checkpoints; --no-hf also disables HF."""
+    import pretrain.train as train_mod
+
+    class FakeStream:
+        def __init__(self, **kwargs):
+            pass
+
+        def batches(self, batch_size=2, drop_last=True):
+            return make_batches(6, seed=13)
+
+    cfg = dict(TRAIN_CFG)
+    cfg.update(
+        {
+            "checkpoint_dir": str(Path(tmpdir) / "ckpt"),
+            "out_dir": str(Path(tmpdir) / "out"),
+            "max_steps": 2,
+            "batch_size": 2,
+            "progress": False,
+            "data": {
+                "dataset_name": "fake",
+                "split": "train",
+                "block_size": 8,
+                "shuffle_buffer": 0,
+                "max_docs": None,
+                "min_chars": 1,
+            },
+        }
+    )
+    checkpoint = Path(cfg["checkpoint_dir"]) / "minillm_latest.pt"
+
+    resume_calls = []
+    hf_disable_args = []
+    original_resume = train_mod.Trainer.resume
+    original_stream = train_mod.OpenWebTextTokenStream
+    original_hf = train_mod.get_hf_settings
+
+    def counting_resume(self):
+        resume_calls.append(True)
+        return original_resume(self)
+
+    def fake_hf_settings(pretrain_cfg, disable=False):
+        hf_disable_args.append(disable)
+        return None
+
+    train_mod.Trainer.resume = counting_resume
+    train_mod.OpenWebTextTokenStream = FakeStream
+    train_mod.get_hf_settings = fake_hf_settings
+    try:
+        train_mod.run_training(cfg, MODEL_CFG)
+        assert len(resume_calls) == 1
+        assert hf_disable_args[-1] is False
+        saved = torch.load(checkpoint, map_location="cpu", weights_only=True)
+        assert saved["step"] == 2
+
+        cfg["max_steps"] = 1
+        train_mod.run_training(cfg, MODEL_CFG, new_run=True)
+        assert len(resume_calls) == 1, "--new must not load any checkpoint"
+        assert hf_disable_args[-1] is False, "--new must keep HF upload enabled"
+        saved = torch.load(checkpoint, map_location="cpu", weights_only=True)
+        assert saved["step"] == 1, "--new must restart from step 0"
+
+        train_mod.run_training(cfg, MODEL_CFG, no_hf=True)
+        assert len(resume_calls) == 1, "--no-hf must not load any checkpoint"
+        assert hf_disable_args[-1] is True, "--no-hf must disable HF"
+        saved = torch.load(checkpoint, map_location="cpu", weights_only=True)
+        assert saved["step"] == 1, "--no-hf must restart from step 0"
+    finally:
+        train_mod.Trainer.resume = original_resume
+        train_mod.OpenWebTextTokenStream = original_stream
+        train_mod.get_hf_settings = original_hf
+
+    parser = train_mod.build_arg_parser()
+    args = parser.parse_args(["--new"])
+    assert args.new and not args.no_hf
+    args = parser.parse_args(["--no-hf"])
+    assert args.no_hf and not args.new
+    args = parser.parse_args(["--new", "--no-hf"])
+    assert args.new and args.no_hf
+    print("--new/--no-hf fresh-start flags OK")
+
+
 def main() -> None:
     with tempfile.TemporaryDirectory() as tmpdir:
         test_tiny_train_and_resume(tmpdir)
     with tempfile.TemporaryDirectory() as tmpdir:
         test_run_training_end_to_end(tmpdir)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        test_new_and_no_hf_flags(tmpdir)
     with tempfile.TemporaryDirectory() as tmpdir:
         test_grad_accumulation(tmpdir)
     with tempfile.TemporaryDirectory() as tmpdir:

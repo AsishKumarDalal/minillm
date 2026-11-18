@@ -184,10 +184,10 @@ Checkpoint: every 60.0 min to /kaggle/working/minilllm/checkpoints
 HF sync: enabled
 Local metrics/plots: /kaggle/working/minilllm/out
 HF metrics/plots: sddfhy546y/minillm/out
-Logging: first 10 steps every step, then every 100 steps; sample generation every 1000 steps.
+Logging: step lines for the first 10 steps only; metrics/plot points every 100 steps; sample generation every 1000 steps.
 step 1 | tokens_seen 1,024 | loss 10.9xxx | ppl 48,xxx | lr 1.50e-06 | tok/s ...
 ...
-step 100 | tokens_seen 102,400 | loss 9.8xxx | ppl 18,xxx | lr ...
+step 10 | tokens_seen 10,240 | loss 9.7xxx | ppl 17,xxx | lr ...
 sample @ step 1000 | Albert Einstein is a ...
 ```
 
@@ -195,14 +195,17 @@ The `tqdm.auto` progress bar always shows a percentage when a target is
 known. With `max_steps` it tracks percent of steps; with `max_hours` it
 tracks percent of the wall-clock budget; with neither it tracks percent of
 the time until the next checkpoint save and resets after each save. The
-suffix updates `step`, `t/s`, `tokens`, `ppl`, `loss`, and either
-`remaining_h` or `save_in` every step. The bar is created once and keeps
-running for the whole run; the step-1000 sample is written above it, so it
-does not restart or create a second bar. INFO lines
-are only printed for the first `log_first_steps` steps (default 10) and then
-every `log_interval` steps (default 100), so a long run does not flood the
-output. HTTP range-request and dataset backend INFO chatter is suppressed;
-warnings still appear. Every `sample_interval` steps (default 1000) the script generates a
+suffix shows the compact stats `#step`, `t/s`, `tok`, `ppl`, and `loss` every
+step, e.g. `#81 | 5.5k t/s | 82.9k tok | ppl 13.1k | loss 9.480`. The
+notebook bar reserves 26% of the row for the bar so the stats, including
+`ppl` and `loss`, stay visible. The bar is created once and keeps running
+for the whole run; the step-1000 sample is written above it, so it does not
+restart or create a second bar. Full INFO step lines are printed only for the
+first `log_first_steps` steps (default 10); after that the live bar is the
+status display, so a long run does not flood the output. A metrics point for
+the plots is still recorded every `log_interval` steps (default 100). HTTP
+range-request and dataset backend INFO chatter is suppressed; warnings still
+appear. Every `sample_interval` steps (default 1000) the script generates a
 short continuation of `sample_prompt` and logs it, which is the easiest way
 to eyeball whether the model is improving. Loss is noisy step-to-step; the
 trend is what matters, and the plots include a smoothed line.
@@ -322,8 +325,8 @@ Leave `vocab_size: 50257` and `tie_weights: true`.
 | `warmup_steps` | `200` | Linear warmup steps. |
 | `weight_decay` | `0.1` | AdamW weight decay. |
 | `betas` | `[0.9, 0.95]` | AdamW momentum betas. |
-| `log_first_steps` | `10` | Log every step for the first N steps. |
-| `log_interval` | `100` | After that, write a metrics point and INFO line every N steps. Lower for denser plots. |
+| `log_first_steps` | `10` | Print a full INFO line every step for the first N steps. |
+| `log_interval` | `100` | After the first N steps, record a metrics/plot point every N steps (the live bar already shows the metrics). Lower for denser plots. |
 
 ### Sample generations
 

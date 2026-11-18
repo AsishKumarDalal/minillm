@@ -264,6 +264,37 @@ def count_parameters(model: nn.Module) -> int:
     return sum(p.numel() for p in model.parameters())
 
 
+def format_compact(value: float) -> str:
+    """Format a large number as 1.2k / 3.4M / 5.6B for a narrow tqdm bar."""
+    value = float(value)
+    if not math.isfinite(value):
+        return "nan"
+    if value >= 1e9:
+        return f"{value / 1e9:.2f}B"
+    if value >= 1e6:
+        return f"{value / 1e6:.2f}M"
+    if value >= 1e3:
+        return f"{value / 1e3:.1f}k"
+    return f"{value:.1f}"
+
+
+def style_progress_bar(pbar) -> None:
+    """Make the notebook bar green and leave room for the stats on the right."""
+    try:
+        _desc, bar_widget, stats_widget = pbar.container.children
+        # tqdm.notebook gives the bar flex=2, which squeezes the stats until
+        # "ppl"/"loss" are cut off. Reserve a fixed slice for the bar and let
+        # the stats use the rest of the row.
+        bar_widget.layout.flex = "0 0 26%"
+        bar_widget.layout.width = "26%"
+        stats_widget.layout.flex = "1 1 auto"
+        stats_widget.layout.overflow = "visible"
+        bar_widget.bar_style = "success"
+    except Exception:
+        # Terminal tqdm has no widget container; colour="green" handles it.
+        pass
+
+
 # ---------------------------------------------------------------------------
 # HuggingFace checkpoint sync
 # ---------------------------------------------------------------------------
@@ -1133,14 +1164,10 @@ class Trainer:
             bar_format="{desc}: {percentage:3.0f}%|{bar:20}{postfix}",
         )
         if show_progress:
-            try:
-                # tqdm.notebook draws an ipywidgets IntProgress; success=green.
-                pbar.container.children[1].bar_style = "success"
-            except Exception:
-                pass
+            style_progress_bar(pbar)
         pbar_last_time = now
-        last_log_time = time.monotonic()
-        last_log_tokens = self.tokens_seen
+        last_rate_time = time.monotonic()
+        last_rate_tokens = self.tokens_seen
         self.nonfinite_streak = 0
         failed = False
 
@@ -1236,8 +1263,10 @@ class Trainer:
                 else:
                     pbar.update(1)
 
-                elapsed = max(now - last_log_time, 1e-9)
-                tok_s = (self.tokens_seen - last_log_tokens) / elapsed
+                elapsed = max(now - last_rate_time, 1e-9)
+                tok_s = (self.tokens_seen - last_rate_tokens) / elapsed
+                last_rate_time = now
+                last_rate_tokens = self.tokens_seen
                 ppl = (
                     math.exp(min(loss_value, 50.0))
                     if loss_finite
@@ -1252,49 +1281,39 @@ class Trainer:
                 # Update the bar every step so tokens_seen and loss visibly
                 # move; only record/log metrics at the configured intervals.
                 # Keep the four requested metrics visible on one continuous
-                # bar: throughput, tokens seen, perplexity, and loss.
+                # bar. Use compact numbers so the notebook widget does not
+                # clip "ppl"/"loss" on the right side.
                 postfix = (
-                    f"step {self.step:,} | t/s {tok_s:,.1f} | "
-                    f"tokens {self.tokens_seen:,} | ppl {ppl_text} | "
-                    f"loss {loss_value:.4f}"
+                    f"#{self.step:,} | {format_compact(tok_s)} t/s | "
+                    f"{format_compact(self.tokens_seen)} tok | "
+                    f"ppl {format_compact(ppl)} | loss {loss_value:.3f}"
                 )
-                if self.max_train_seconds is not None:
-                    remaining = max(
-                        0.0,
-                        self.max_train_seconds
-                        - (now - self.train_start_time),
-                    )
-                    postfix += f" | remaining {remaining / 3600:.2f}h"
-                elif progress_time_based:
-                    next_save = max(
-                        0.0,
-                        self.interval_seconds
-                        - (now - self.last_checkpoint_time),
-                    )
-                    postfix += f" | save_in {next_save / 60:.1f}m"
                 pbar.set_postfix_str(postfix)
-                # Log every step only during the first few steps, then every
-                # log_interval steps, so long runs do not flood the output.
-                if (
+                # Record metrics for the plots every log_interval steps, but
+                # only print full INFO lines for the first log_first_steps.
+                # After that the live tqdm suffix is the status display.
+                if loss_finite and (
                     self.step <= log_first_steps
                     or self.step % log_interval == 0
-                ) and loss_finite:
+                ):
                     self._record_metric(loss_value, lr)
-                    logging.info(
-                        "step %d | tokens_seen %s | loss %.4f | ppl %s | "
-                        "lr %.2e | tok/s %.1f",
-                        self.step,
-                        f"{self.tokens_seen:,}",
-                        loss_value,
-                        ppl_text,
-                        lr,
-                        tok_s,
-                    )
-                    last_log_time = now
-                    last_log_tokens = self.tokens_seen
+                    if self.step <= log_first_steps:
+                        logging.info(
+                            "step %d | tokens_seen %s | loss %.4f | ppl %s | "
+                            "lr %.2e | tok/s %.1f",
+                            self.step,
+                            f"{self.tokens_seen:,}",
+                            loss_value,
+                            ppl_text,
+                            lr,
+                            tok_s,
+                        )
 
                 if sample_interval > 0 and self.step % sample_interval == 0:
                     self._log_sample(pbar)
+                    # Do not let sample generation depress the next t/s.
+                    last_rate_time = time.monotonic()
+                    last_rate_tokens = self.tokens_seen
 
                 if self.nonfinite_streak >= 5:
                     raise RuntimeError(
@@ -1314,13 +1333,16 @@ class Trainer:
                     and self.interval_seconds > 0
                     and (now - self.last_checkpoint_time) >= self.interval_seconds
                 ):
-                    if self.save_checkpoint() and progress_time_based and (
-                        self.max_train_seconds is None
-                    ):
-                        # start a fresh "time until next save" percentage
-                        pbar.reset(total=progress_total)
-                        pbar.set_description(progress_desc)
-                        pbar_last_time = time.monotonic()
+                    if self.save_checkpoint():
+                        last_rate_time = time.monotonic()
+                        last_rate_tokens = self.tokens_seen
+                        if progress_time_based and (
+                            self.max_train_seconds is None
+                        ):
+                            # start a fresh "time until next save" percentage
+                            pbar.reset(total=progress_total)
+                            pbar.set_description(progress_desc)
+                            pbar_last_time = time.monotonic()
 
                 if data_exhausted:
                     logging.info("Data stream exhausted at step %d.", self.step)
@@ -1422,8 +1444,8 @@ def run_training(
         resolve_path(pretrain_cfg.get("out_dir", "out")),
     )
     logging.info(
-        "Logging: first %d steps every step, then every %d steps; "
-        "sample generation every %d steps.",
+        "Logging: step lines for the first %d steps only; metrics/plot "
+        "points every %d steps; sample generation every %d steps.",
         int(pretrain_cfg.get("log_first_steps", 10) or 0),
         int(pretrain_cfg.get("log_interval", 100) or 100),
         int(pretrain_cfg.get("sample_interval", 1000) or 0),

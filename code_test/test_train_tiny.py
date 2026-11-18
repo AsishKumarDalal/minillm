@@ -10,7 +10,9 @@ Run from the project root:
 
 from __future__ import annotations
 
+import logging
 import os
+import re
 import sys
 import tempfile
 from pathlib import Path
@@ -236,12 +238,38 @@ def test_sparse_log_schedule(tmpdir: str) -> None:
         train_cfg=cfg,
         hf_cfg=None,
     )
-    trainer.train(make_batches(num_steps=25, seed=11))
+
+    messages = []
+
+    class Capture(logging.Handler):
+        def emit(self, record):
+            messages.append(record.getMessage())
+
+    capture = Capture()
+    root_logger = logging.getLogger()
+    previous_level = root_logger.level
+    root_logger.setLevel(logging.INFO)
+    root_logger.addHandler(capture)
+    try:
+        trainer.train(make_batches(num_steps=25, seed=11))
+    finally:
+        root_logger.removeHandler(capture)
+        root_logger.setLevel(previous_level)
 
     # First 3 steps, then every 10; the final save adds the last step.
     steps = [point["step"] for point in trainer.history]
     assert steps == [1, 2, 3, 10, 20, 25], steps
-    print(f"sparse log schedule OK: {steps}")
+
+    # Full INFO step lines stop after log_first_steps; the bar carries the
+    # live metrics from then on.
+    step_lines = [
+        message
+        for message in messages
+        if re.match(r"^step \d+ \| tokens_seen ", message)
+    ]
+    logged_steps = [int(re.match(r"^step (\d+)", m).group(1)) for m in step_lines]
+    assert logged_steps == [1, 2, 3], logged_steps
+    print(f"sparse log schedule OK: {steps}; INFO lines only for {logged_steps}")
 
 
 def test_sample_generation(tmpdir: str) -> None:
@@ -363,8 +391,38 @@ def test_progress_bar_percentage(tmpdir: str) -> None:
         assert "{percentage" in bar.bar_format, bar.bar_format
         assert "{postfix}" in bar.bar_format, bar.bar_format
         assert bar.colour == "green", bar.colour
-        for field in ("step", "t/s", "tokens", "ppl", "loss"):
+        for field in ("t/s", "tok", "ppl", "loss"):
             assert field in bar.postfix, (field, bar.postfix)
+
+        assert train_mod.format_compact(5480.3) == "5.5k"
+        assert train_mod.format_compact(82_944) == "82.9k"
+        assert train_mod.format_compact(2_740_224) == "2.74M"
+        assert train_mod.format_compact(float("nan")) == "nan"
+
+        class FakeLayout:
+            flex = None
+            width = None
+            overflow = None
+
+        class FakeWidget:
+            def __init__(self):
+                self.layout = FakeLayout()
+
+        fake_desc, fake_bar, fake_stats = FakeWidget(), FakeWidget(), FakeWidget()
+        fake_bar.bar_style = "info"
+
+        class FakeContainer:
+            children = (fake_desc, fake_bar, fake_stats)
+
+        class FakePbar:
+            container = FakeContainer()
+
+        train_mod.style_progress_bar(FakePbar())
+        assert fake_bar.layout.flex == "0 0 26%", fake_bar.layout.flex
+        assert fake_bar.layout.width == "26%", fake_bar.layout.width
+        assert fake_stats.layout.flex == "1 1 auto", fake_stats.layout.flex
+        assert fake_stats.layout.overflow == "visible", fake_stats.layout.overflow
+        assert fake_bar.bar_style == "success", fake_bar.bar_style
 
         run_case(
             "hours",
@@ -374,7 +432,6 @@ def test_progress_bar_percentage(tmpdir: str) -> None:
         assert bar.total == 3600.0 and bar.unit == "s", (bar.total, bar.unit)
         assert "time budget" in bar.desc, bar.desc
         assert bar.n > 0, bar.n
-        assert "step" in bar.postfix and "remaining" in bar.postfix, bar.postfix
 
         run_case(
             "save",
@@ -383,7 +440,7 @@ def test_progress_bar_percentage(tmpdir: str) -> None:
         bar = bars[-1]
         assert bar.total == 3600.0 and bar.unit == "s", (bar.total, bar.unit)
         assert "to next save" in bar.desc, bar.desc
-        assert "step" in bar.postfix and "save_in" in bar.postfix, bar.postfix
+        assert "#" in bar.postfix and "loss" in bar.postfix, bar.postfix
 
         run_case(
             "reset",
@@ -412,6 +469,8 @@ def test_progress_bar_percentage(tmpdir: str) -> None:
         assert len(bars) - before == 1, "sample generation must not create a new bar"
         assert len(bar.writes) == 3, bar.writes
         assert all("sample @ step" in message for message in bar.writes), bar.writes
+        assert bar.n == 3, bar.n
+        assert "#3" in bar.postfix and "loss" in bar.postfix, bar.postfix
     finally:
         train_mod.tqdm = original
     print("progress bar percentage modes + single bar with samples OK")

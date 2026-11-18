@@ -120,10 +120,12 @@ from a random model, and never download from or upload to HF:
 
 ### Logging and sample generations
 
-By default the run logs every step for the first 10 steps, then only every
-100 steps, so a multi-hour log stays readable. Every 1000 steps it also
-generates a short continuation of `sample_prompt` (default
-`"Albert Einstein is a"`) and writes it to the log, for example:
+By default the run prints a full INFO line every step for the first 10
+steps only. After that it stays quiet and the live tqdm suffix is the
+status display; a metrics point for the plots is still recorded every 100
+steps. Every 1000 steps it also generates a short continuation of
+`sample_prompt` (default `"Albert Einstein is a"`) and writes it above the
+bar, for example:
 
 ```text
 sample @ step 1000 | Albert Einstein is a German-born theoretical physicist ...
@@ -141,8 +143,8 @@ sample_temperature: 0.8
 sample_top_k: 50
 ```
 
-Set `sample_interval: 0` to disable sampling. tqdm still updates every step;
-only the INFO lines (and metric points) are sparse.
+Set `sample_interval: 0` to disable sampling. The bar still updates every
+step; only the full INFO step lines (and plot metric points) are sparse.
 
 Change the checkpoint directory or batch size from the CLI:
 
@@ -177,14 +179,19 @@ The bar always shows a percentage when there is a target:
 - neither set → percentage of the time until the next checkpoint save,
   resetting after every save. This is the normal open-ended pretraining mode.
 
-The suffix shows `step`, `t/s`, `tokens`, `ppl`, and `loss` every step
-(the four training metrics stay visible in one line). When time-based, it
-also shows `remaining_h` (with `max_hours`) or `save_in` (minutes until the
-next save). The bar is created once and keeps running; sample generations
-are written above it with `tqdm.write`, so a step-1000 sample does not
-restart or replace the bar. The bar is green in terminals and in Jupyter.
-HTTP range-request/dataset INFO chatter from `httpx` and `datasets` is
-silenced; warnings still appear.
+The suffix shows the same four metrics every step, in a compact form:
+
+```text
+#81 | 5.5k t/s | 82.9k tok | ppl 13.1k | loss 9.480
+```
+
+The notebook layout reserves 26% of the row for the bar and gives the
+remaining width to the stats, so `ppl` and `loss` are not cut off. The bar
+is created once and keeps running; sample generations are written above it
+with `tqdm.write`, so a step-1000 sample does not restart or replace the
+bar. The bar is green in terminals and in Jupyter. HTTP
+range-request/dataset INFO chatter from `httpx` and `datasets` is silenced;
+warnings still appear.
 
 In a notebook, pass an explicit argument list so argparse does not try to
 parse kernel arguments such as `-f`:

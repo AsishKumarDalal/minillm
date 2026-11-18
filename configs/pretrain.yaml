@@ -38,7 +38,7 @@ checkpoint_interval_minutes: 60
 checkpoint_dir: checkpoints
 out_dir: out            # local metrics + plots; also uploaded to HF under out/
 save_optimizer: true    # false = smaller checkpoints, optimizer starts fresh
-progress: true          # tqdm.auto; works in notebooks and terminals
+progress: true          # tqdm.auto bar; % of max_steps, max_hours, or next save
 
 data:
   dataset_name: Skylion007/openwebtext

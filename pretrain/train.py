@@ -1051,14 +1051,52 @@ class Trainer:
         self.model.train()
         self.optimizer.zero_grad(set_to_none=True)
 
+        # Choose what the tqdm percentage measures:
+        #   * max_steps  -> percent of requested optimizer steps
+        #   * max_hours  -> percent of the wall-clock budget
+        #   * neither    -> percent of the time until the next checkpoint save,
+        #                   so the bar still shows a percentage and resets
+        #                   after every save instead of sitting at 0%.
+        now = time.monotonic()
+        progress_time_based = False
+        if max_steps is not None:
+            progress_total: Optional[float] = max_steps
+            progress_initial: float = min(self.step, max_steps)
+            progress_unit = "step"
+            progress_desc = "pretrain"
+        elif self.max_train_seconds is not None:
+            progress_time_based = True
+            progress_total = self.max_train_seconds
+            progress_initial = min(
+                progress_total,
+                max(0.0, now - self.train_start_time),
+            )
+            progress_unit = "s"
+            progress_desc = "pretrain (time budget)"
+        elif self.interval_seconds > 0:
+            progress_time_based = True
+            progress_total = self.interval_seconds
+            progress_initial = min(
+                progress_total,
+                max(0.0, now - self.last_checkpoint_time),
+            )
+            progress_unit = "s"
+            progress_desc = "pretrain (to next save)"
+        else:
+            progress_total = None
+            progress_initial = self.step
+            progress_unit = "step"
+            progress_desc = "pretrain"
+
         pbar = tqdm(
-            total=max_steps,
-            initial=self.step,
-            desc="pretrain",
-            unit="step",
+            total=progress_total,
+            initial=progress_initial,
+            desc=progress_desc,
+            unit=progress_unit,
             dynamic_ncols=True,
             disable=not show_progress,
         )
+        pbar_last_time = now
         last_log_time = time.monotonic()
         last_log_tokens = self.tokens_seen
         self.nonfinite_streak = 0
@@ -1149,9 +1187,13 @@ class Trainer:
                         "n/a" if grad_norm_value is None else grad_norm_value,
                         self.nonfinite_streak,
                     )
-                pbar.update(1)
-
                 now = time.monotonic()
+                if progress_time_based:
+                    pbar.update(max(0.0, now - pbar_last_time))
+                    pbar_last_time = now
+                else:
+                    pbar.update(1)
+
                 elapsed = max(now - last_log_time, 1e-9)
                 tok_s = (self.tokens_seen - last_log_tokens) / elapsed
                 ppl = (
@@ -1174,6 +1216,9 @@ class Trainer:
                     "lr": f"{lr:.2e}",
                     "tok_s": f"{tok_s:,.1f}",
                 }
+                if progress_time_based:
+                    # The percentage is time-based, so show the step count too.
+                    postfix["step"] = f"{self.step:,}"
                 if self.max_train_seconds is not None:
                     remaining = max(
                         0.0,
@@ -1181,6 +1226,13 @@ class Trainer:
                         - (now - self.train_start_time),
                     )
                     postfix["remaining_h"] = f"{remaining / 3600:.2f}"
+                elif progress_time_based:
+                    next_save = max(
+                        0.0,
+                        self.interval_seconds
+                        - (now - self.last_checkpoint_time),
+                    )
+                    postfix["save_in"] = f"{next_save / 60:.1f}m"
                 pbar.set_postfix(postfix)
                 # Log every step only during the first few steps, then every
                 # log_interval steps, so long runs do not flood the output.
@@ -1223,7 +1275,13 @@ class Trainer:
                     and self.interval_seconds > 0
                     and (now - self.last_checkpoint_time) >= self.interval_seconds
                 ):
-                    self.save_checkpoint()
+                    if self.save_checkpoint() and progress_time_based and (
+                        self.max_train_seconds is None
+                    ):
+                        # start a fresh "time until next save" percentage
+                        pbar.reset(total=progress_total)
+                        pbar.set_description(progress_desc)
+                        pbar_last_time = time.monotonic()
 
                 if data_exhausted:
                     logging.info("Data stream exhausted at step %d.", self.step)

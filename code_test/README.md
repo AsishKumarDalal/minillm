@@ -47,6 +47,7 @@ This checks:
 - GPT-2 initialization keeps the initial loss near `ln(vocab_size)`
 - gradient accumulation
 - sparse logging schedule (first N steps, then every `log_interval`)
+- tqdm percentage modes (`max_steps`, `max_hours`, next checkpoint)
 - periodic sample generation from `sample_prompt`
 - `--new` starts fresh but keeps HF sync; `--no-hf` starts fresh with no HF
 - linear warmup + cosine LR schedule

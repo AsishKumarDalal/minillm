@@ -191,13 +191,17 @@ step 100 | tokens_seen 102,400 | loss 9.8xxx | ppl 18,xxx | lr ...
 sample @ step 1000 | Einstein was a ...
 ```
 
-The `tqdm.auto` progress bar updates `tokens`, `loss`, `ppl`, `lr`, and
-`tok/s` every step. INFO lines are only printed for the first
-`log_first_steps` steps (default 10) and then every `log_interval` steps
-(default 100), so a long run does not flood the output. Every
-`sample_interval` steps (default 1000) the script generates a short
-continuation of `sample_prompt` and logs it, which is the easiest way to
-eyeball whether the model is improving. Loss is noisy step-to-step; the
+The `tqdm.auto` progress bar always shows a percentage when a target is
+known. With `max_steps` it tracks percent of steps; with `max_hours` it
+tracks percent of the wall-clock budget; with neither it tracks percent of
+the time until the next checkpoint save and resets after each save. The
+suffix updates `step` (when the bar is time-based), `tokens`, `loss`, `ppl`,
+`lr`, `tok/s`, and either `remaining_h` or `save_in` every step. INFO lines
+are only printed for the first `log_first_steps` steps (default 10) and then
+every `log_interval` steps (default 100), so a long run does not flood the
+output. Every `sample_interval` steps (default 1000) the script generates a
+short continuation of `sample_prompt` and logs it, which is the easiest way
+to eyeball whether the model is improving. Loss is noisy step-to-step; the
 trend is what matters, and the plots include a smoothed line.
 
 ---

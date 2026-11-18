@@ -278,6 +278,114 @@ def test_sample_generation(tmpdir: str) -> None:
     print(f"sample generation OK: {trainer.last_sample_text!r}")
 
 
+def test_progress_bar_percentage(tmpdir: str) -> None:
+    """The tqdm bar gets a real total/percentage in every training mode."""
+    import pretrain.train as train_mod
+
+    bars = []
+
+    class FakeTqdm:
+        def __init__(self, total=None, initial=0, desc="", unit="step", **kwargs):
+            self.total = total
+            self.initial = initial
+            self.desc = desc
+            self.unit = unit
+            self.n = initial
+            self.postfix = {}
+            self.resets = 0
+            self.closed = False
+            bars.append(self)
+
+        def update(self, n=1.0):
+            self.n += float(n)
+
+        def set_postfix(self, postfix=None, **kwargs):
+            self.postfix = dict(postfix or {})
+            self.postfix.update(kwargs)
+
+        def set_description(self, desc):
+            self.desc = desc
+
+        def reset(self, total=None):
+            self.resets += 1
+            if total is not None:
+                self.total = total
+            self.n = 0
+            self.initial = 0
+
+        def close(self):
+            self.closed = True
+
+    def run_case(name: str, overrides: dict, num_batches: int = 1) -> None:
+        cfg = dict(TRAIN_CFG)
+        cfg.update(
+            {
+                "checkpoint_dir": str(Path(tmpdir) / name),
+                "out_dir": str(Path(tmpdir) / name / "out"),
+                "progress": True,
+            }
+        )
+        cfg.update(overrides)
+        device, _ = select_device(cfg)
+        model = GPT(MODEL_CFG)
+        optimizer = torch.optim.AdamW(model.parameters(), lr=cfg["learning_rate"])
+        trainer = Trainer(
+            model=model,
+            optimizer=optimizer,
+            device=device,
+            model_cfg=MODEL_CFG,
+            train_cfg=cfg,
+            hf_cfg=None,
+        )
+        trainer.train(make_batches(num_steps=num_batches, seed=17))
+
+    original = train_mod.tqdm
+    train_mod.tqdm = FakeTqdm
+    try:
+        run_case(
+            "steps",
+            {"max_steps": 2, "max_hours": None},
+            num_batches=2,
+        )
+        bar = bars[-1]
+        assert bar.total == 2 and bar.unit == "step", (bar.total, bar.unit)
+        assert bar.desc == "pretrain", bar.desc
+        assert bar.n == 2, bar.n
+
+        run_case(
+            "hours",
+            {"max_steps": None, "max_hours": 1, "checkpoint_interval_minutes": 60},
+        )
+        bar = bars[-1]
+        assert bar.total == 3600.0 and bar.unit == "s", (bar.total, bar.unit)
+        assert "time budget" in bar.desc, bar.desc
+        assert bar.n > 0, bar.n
+        assert "step" in bar.postfix and "remaining_h" in bar.postfix, bar.postfix
+
+        run_case(
+            "save",
+            {"max_steps": None, "max_hours": None, "checkpoint_interval_minutes": 60},
+        )
+        bar = bars[-1]
+        assert bar.total == 3600.0 and bar.unit == "s", (bar.total, bar.unit)
+        assert "to next save" in bar.desc, bar.desc
+        assert "step" in bar.postfix and "save_in" in bar.postfix, bar.postfix
+
+        run_case(
+            "reset",
+            {
+                "max_steps": None,
+                "max_hours": None,
+                "checkpoint_interval_minutes": 1e-6,
+            },
+        )
+        bar = bars[-1]
+        assert bar.resets >= 1, "bar must reset after a periodic checkpoint save"
+    finally:
+        train_mod.tqdm = original
+    print("progress bar percentage modes + reset OK")
+
+
 def test_resume_rejects_nonfinite_checkpoint(tmpdir: str) -> None:
     trainer = build_trainer(tmpdir, max_steps=3)
 
@@ -676,6 +784,8 @@ def main() -> None:
         test_sparse_log_schedule(tmpdir)
     with tempfile.TemporaryDirectory() as tmpdir:
         test_sample_generation(tmpdir)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        test_progress_bar_percentage(tmpdir)
     with tempfile.TemporaryDirectory() as tmpdir:
         test_resume_rejects_nonfinite_checkpoint(tmpdir)
     with tempfile.TemporaryDirectory() as tmpdir:

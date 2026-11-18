@@ -170,6 +170,17 @@ The script imports `tqdm.auto`, so calling `main()` in a Kaggle/Jupyter
 notebook renders a notebook progress bar. It falls back to a terminal bar in
 a normal shell. Set `progress: false` in `configs/pretrain.yaml` to disable it.
 
+The bar always shows a percentage when there is a target:
+
+- `max_steps` set → percentage of requested optimizer steps.
+- `max_hours` set → percentage of the wall-clock budget.
+- neither set → percentage of the time until the next checkpoint save,
+  resetting after every save. This is the normal open-ended pretraining mode.
+
+The suffix shows `step`, `tokens`, `loss`, `ppl`, `lr`, and `tok/s` every
+step. When time-based, it also shows `remaining_h` (with `max_hours`) or
+`save_in` (minutes until the next save).
+
 In a notebook, pass an explicit argument list so argparse does not try to
 parse kernel arguments such as `-f`:
 
@@ -288,5 +299,6 @@ decreasing, plots written), run:
 .venv/bin/python code_test/test_train_curves_real.py
 ```
 
-The training progress bar updates `tokens`, `loss`, and `ppl` every step;
-checkpoint plots are written every `checkpoint_interval_minutes`.
+The training progress bar shows a percentage and updates `step`, `tokens`,
+`loss`, and `ppl` every step; checkpoint plots are written every
+`checkpoint_interval_minutes`.

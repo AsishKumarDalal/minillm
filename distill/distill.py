@@ -265,6 +265,80 @@ def load_student_model(
     return model, path
 
 
+def load_resume_state(
+    cfg: dict,
+    student_cfg: dict,
+    device: torch.device,
+    checkpoint_dir: Path,
+) -> Optional[tuple[nn.Module, dict]]:
+    """Load a previous distilled checkpoint, or return None if none exists.
+
+    With no ``--new`` flag, training continues from the newest
+    ``distilled_model.pt``: first the local copy, then the HF copy. ``--new``
+    skips this entirely and starts from the original student checkpoint.
+    """
+    hf_section = cfg.get("hf") or {}
+    filename = str(hf_section.get("filename", "distilled_model.pt")).strip()
+    local_path = checkpoint_dir / filename
+    token_env = str(hf_section.get("token_env", "HF_TOKEN"))
+    repo_id = str(
+        hf_section.get("repo_id")
+        or (cfg.get("student") or {}).get("repo_id", "")
+    ).strip()
+
+    path: Optional[Path] = local_path if local_path.exists() else None
+    if path is None and repo_id:
+        hf = {
+            "repo_id": repo_id,
+            "filename": filename,
+            "token": _token_from_env(token_env),
+        }
+        path = download_checkpoint(hf, checkpoint_dir)
+    if path is None:
+        return None
+
+    try:
+        try:
+            state = torch.load(path, map_location="cpu", weights_only=True)
+        except TypeError:
+            state = torch.load(path, map_location="cpu")
+    except Exception as exc:
+        logging.warning("Could not read distilled checkpoint %s: %s", path, exc)
+        return None
+
+    if not isinstance(state, dict) or "model" not in state:
+        logging.warning("Distilled checkpoint %s has no model state dict.", path)
+        return None
+    saved_cfg = state.get("model_config")
+    if not isinstance(saved_cfg, dict):
+        logging.warning("Distilled checkpoint %s has no model_config.", path)
+        return None
+    mismatches = model_config_mismatches(saved_cfg, student_cfg)
+    if mismatches:
+        logging.warning(
+            "Distilled checkpoint %s architecture mismatch: %s; starting "
+            "from the original student instead.",
+            path,
+            "; ".join(mismatches),
+        )
+        return None
+
+    model = GPT(student_cfg).to(device)
+    try:
+        model.load_state_dict(state["model"], strict=True)
+    except Exception as exc:
+        logging.warning("Could not load distilled weights from %s: %s", path, exc)
+        return None
+    model.train()
+    logging.info(
+        "Resuming distillation from %s at step %d (%s tokens).",
+        path,
+        int(state.get("step", 0)),
+        f"{int(state.get('tokens_seen', 0)):,}",
+    )
+    return model, state
+
+
 # ---------------------------------------------------------------------------
 # Loss
 # ---------------------------------------------------------------------------
@@ -402,6 +476,31 @@ class Distiller:
         self.amp_dtype = choose_amp_dtype(device, train_cfg)
         self.use_amp = self.amp_dtype is not None
         self.scaler = make_grad_scaler(device, self.use_amp, self.amp_dtype)
+
+    def restore_state(self, state: dict) -> None:
+        """Continue from a saved distilled checkpoint (step, tokens, history)."""
+        self.step = int(state.get("step", 0))
+        self.tokens_seen = int(state.get("tokens_seen", 0))
+        history = state.get("metrics_history")
+        if isinstance(history, list):
+            self.history = [dict(entry) for entry in history if isinstance(entry, dict)]
+        saved_alpha = state.get("distill_alpha")
+        saved_temp = state.get("distill_temperature")
+        if saved_alpha is not None:
+            self.alpha = float(saved_alpha)
+        if saved_temp is not None:
+            self.temperature = float(saved_temp)
+        if bool(self.train_cfg.get("save_optimizer", False)):
+            optimizer_state = state.get("optimizer")
+            if isinstance(optimizer_state, dict):
+                try:
+                    self.optimizer.load_state_dict(optimizer_state)
+                except Exception as exc:
+                    logging.warning("Could not restore optimizer state: %s", exc)
+        self.last_saved_step = self.step
+        self.last_uploaded_step = self.step
+        self.last_outputs_uploaded_step = self.step
+        self.last_checkpoint_time = time.monotonic()
 
     # -- metrics / output ---------------------------------------------------
     def _record_metric(self, loss: float, ce: float, kl: float) -> None:
@@ -685,7 +784,7 @@ def format_compact(value: float) -> str:
 # ---------------------------------------------------------------------------
 # Run setup
 # ---------------------------------------------------------------------------
-def run_distillation(cfg: dict) -> None:
+def run_distillation(cfg: dict, new_run: bool = False) -> None:
     load_env_file(ROOT_DIR / ".env")
     pid_file = os.environ.get("MINILLM_DISTILL_PID_FILE", "").strip()
     if pid_file:
@@ -701,6 +800,23 @@ def run_distillation(cfg: dict) -> None:
     device, num_gpus = select_device(cfg)
     logging.info("Student device: %s | visible GPUs: %d", device, num_gpus)
 
+    # By default use every visible GPU for the student and put the teacher on
+    # the second GPU when one exists. This keeps both GPUs busy and avoids
+    # replicating the large teacher with DataParallel.
+    teacher_cfg = cfg.setdefault("teacher", {})
+    if (
+        not str(teacher_cfg.get("device") or "").strip()
+        and device.type == "cuda"
+        and num_gpus >= 2
+    ):
+        teacher_cfg["device"] = f"cuda:{min(1, num_gpus - 1)}"
+        logging.info(
+            "Auto-placing teacher on %s (student uses cuda:0 with "
+            "DataParallel across %d GPUs).",
+            teacher_cfg["device"],
+            num_gpus,
+        )
+
     student_cfg = load_student_model_config(cfg)
     data_cfg = cfg.get("data") or {}
     block_size = data_cfg.get("block_size") or student_cfg["context_length"]
@@ -713,7 +829,20 @@ def run_distillation(cfg: dict) -> None:
 
     checkpoint_dir = resolve_path(cfg.get("checkpoint_dir", "distill_checkpoints"))
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
-    student, _ = load_student_model(cfg, student_cfg, device, checkpoint_dir)
+
+    resume = None if new_run else load_resume_state(
+        cfg, student_cfg, device, checkpoint_dir
+    )
+    if resume is None:
+        student, _ = load_student_model(cfg, student_cfg, device, checkpoint_dir)
+        resume_state = None
+    else:
+        student, resume_state = resume
+
+    if num_gpus > 1:
+        student = nn.DataParallel(student, device_ids=list(range(num_gpus)))
+        logging.info("Student wrapped in DataParallel across %d GPUs.", num_gpus)
+
     teacher, _tokenizer, teacher_device, teacher_dtype = load_teacher(
         cfg, student_cfg, device, block_size
     )
@@ -750,6 +879,8 @@ def run_distillation(cfg: dict) -> None:
         train_cfg=cfg,
         hf_cfg=hf_cfg,
     )
+    if resume_state is not None:
+        distiller.restore_state(resume_state)
     logging.info(
         "Distillation: alpha=%.2f (KL weight), CE weight=%.2f, T=%.1f, "
         "block_size=%d, batch=%d.",
@@ -1008,6 +1139,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=None,
         help="Testing override: seconds between saves/uploads.",
     )
+    parser.add_argument(
+        "--new",
+        action="store_true",
+        help="Ignore any previous distilled_model.pt and start from the "
+             "original student checkpoint (minillm_latest.pt).",
+    )
     parser.add_argument("--no-hf", action="store_true", help="Disable HF upload")
     parser.add_argument("--upload", action="store_true", help="Enable HF upload")
     mode = parser.add_mutually_exclusive_group()
@@ -1064,7 +1201,7 @@ def distill_main(argv: Optional[list[str]] = None) -> None:
         raise SystemExit(start_detached(args, raw_argv, cfg))
 
     try:
-        run_distillation(cfg)
+        run_distillation(cfg, new_run=args.new)
     except KeyboardInterrupt:
         logging.info("Distillation interrupted by user.")
 

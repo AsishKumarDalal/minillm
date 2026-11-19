@@ -25,6 +25,7 @@ from distill.distill import (  # noqa: E402
     apply_cli_overrides,
     build_arg_parser,
     distillation_loss,
+    load_resume_state,
     load_yaml,
 )
 from model.model import GPT  # noqa: E402
@@ -163,6 +164,7 @@ def test_config_and_overrides() -> None:
     assert cfg["hf"]["filename"] == "distilled_model.pt"
     assert cfg["hf"]["out_dir"] == "distilled_outs"
     assert cfg["out_dir"] == "distilled_outs"
+    assert int(cfg["num_gpus"]) == 2
     assert 0.0 <= float(cfg["alpha"]) <= 1.0
 
     parser = build_arg_parser()
@@ -175,6 +177,7 @@ def test_config_and_overrides() -> None:
             "--checkpoint-seconds",
             "10",
             "--upload",
+            "--new",
         ]
     )
     apply_cli_overrides(cfg, args)
@@ -182,13 +185,65 @@ def test_config_and_overrides() -> None:
     assert cfg["alpha"] == 0.6
     assert abs(cfg["checkpoint_interval_minutes"] - 10.0 / 60.0) < 1e-9
     assert cfg["hf"]["enabled"] is True
+    assert args.new is True
     print("distill config and CLI overrides OK")
+
+
+def test_resume_from_distilled_checkpoint(tmpdir: str) -> None:
+    checkpoint_dir = Path(tmpdir)
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    checkpoint = checkpoint_dir / "distilled_model.pt"
+    model = GPT(STUDENT_CFG)
+    torch.save(
+        {
+            "format_version": 1,
+            "model": model.state_dict(),
+            "model_config": STUDENT_CFG,
+            "step": 7,
+            "tokens_seen": 896,
+            "metrics_history": [{"step": 7, "loss": 1.0, "ce": 0.8, "kl": 1.2}],
+            "distill_alpha": 0.6,
+            "distill_temperature": 1.0,
+        },
+        checkpoint,
+    )
+    cfg = {
+        "checkpoint_dir": str(checkpoint_dir),
+        "hf": {"filename": "distilled_model.pt", "repo_id": ""},
+    }
+    resumed = load_resume_state(
+        cfg, STUDENT_CFG, torch.device("cpu"), checkpoint_dir
+    )
+    assert resumed is not None
+    student, state = resumed
+    assert state["step"] == 7
+
+    optimizer = torch.optim.AdamW(student.parameters(), lr=1e-3)
+    distiller = Distiller(
+        model=student,
+        teacher=make_teacher(),
+        optimizer=optimizer,
+        device=torch.device("cpu"),
+        teacher_device=torch.device("cpu"),
+        teacher_dtype=torch.float32,
+        student_cfg=STUDENT_CFG,
+        train_cfg={"checkpoint_dir": str(checkpoint_dir), "save_optimizer": False},
+        hf_cfg=None,
+    )
+    distiller.restore_state(state)
+    assert distiller.step == 7
+    assert distiller.tokens_seen == 896
+    assert distiller.alpha == 0.6
+    assert len(distiller.history) == 1
+    print("distilled checkpoint resume OK")
 
 
 def main() -> None:
     test_distillation_loss_weighting()
     with tempfile.TemporaryDirectory() as tmpdir:
         test_distiller_end_to_end(tmpdir)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        test_resume_from_distilled_checkpoint(tmpdir)
     test_config_and_overrides()
     print("all tiny distillation tests passed")
 

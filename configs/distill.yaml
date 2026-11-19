@@ -10,21 +10,27 @@
 
 seed: 1337
 device: auto          # auto | cpu | cuda | cuda:0
-num_gpus: 1           # student uses one GPU; teacher may use teacher.device
+num_gpus: 2           # student uses DataParallel across up to this many GPUs
 
 teacher:
   name: openai-community/gpt2-xl   # change to any GPT-2-family HF model
-  device: null          # null = same device as student; "cpu" offloads teacher
+  device: null          # null = auto: cuda:1 when 2+ GPUs, else student device
+                        # "cpu" offloads the teacher to CPU
   dtype: auto           # auto | bf16 | fp16 | fp32
   context_length: null  # null = teacher model default; only used for a check
 
 student:
-  source: hf            # hf | local
+  source: hf            # hf | local; used only when there is no distilled checkpoint
   repo_id: sddfhy546y/minillm
   filename: minillm_latest.pt
   local_path: checkpoints/minillm_latest.pt
   prefer_local: true    # use local_path when it exists, else download from HF
   token_env: HF_TOKEN
+
+# Resume: with no --new flag, the newest distilled checkpoint is loaded first
+# (local distill_checkpoints/distilled_model.pt, else the same file on HF),
+# so `--stop` followed by a normal run continues training. Pass --new to
+# ignore it and restart from the original student above.
 
 model_config: configs/model.yaml
 

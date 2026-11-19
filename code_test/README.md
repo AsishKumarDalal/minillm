@@ -100,9 +100,10 @@ Run the tiny distillation tests (CPU, local 64-vocab teacher, no network):
 ```
 
 This checks CE/KL weighting with `alpha`, temperature scaling, a full
-distillation step loop, and `distilled_model.pt` / `distilled_outs/metrics.json`
-save/load. A smoke test with a small real HuggingFace teacher (two steps on
-local text, no uploads) is also available:
+distillation step loop, `distilled_model.pt` / `distilled_outs/metrics.json`
+save/load, and resume from a previous distilled checkpoint. A smoke test with
+a small real HuggingFace teacher (two steps on local text, no uploads) is also
+available:
 
 ```bash
 .venv/bin/python code_test/smoke_distill_real_teacher.py

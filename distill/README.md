@@ -55,7 +55,8 @@ os.environ["HF_TOKEN"] = UserSecretsClient().get_secret("HF_TOKEN")
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `teacher.name` | `openai-community/gpt2-xl` | HF model id for the frozen teacher. Change to any GPT-2-family causal LM with the same vocab. |
-| `teacher.device` | `null` | `null` = same device as student; `"cpu"` offloads the teacher to save GPU memory. |
+| `device` / `num_gpus` | `auto` / `2` | Student uses `cuda:0` and `DataParallel` across up to `num_gpus` GPUs. Set `device: cpu` for CPU. |
+| `teacher.device` | `null` | `null` = auto: `cuda:1` when 2+ GPUs are visible, otherwise the student's device. `"cpu"` offloads the teacher to CPU. |
 | `teacher.dtype` | `auto` | `auto`, `bf16`, `fp16`, `fp32` for teacher weights. |
 | `teacher.context_length` | `null` | Only checked against `data.block_size`. |
 | `student.source` | `hf` | `hf` downloads `student.filename`; `local` reads `student.local_path`. |
@@ -87,6 +88,31 @@ hf:
 ```
 
 This does not overwrite `minillm_latest.pt` (the student).
+
+## Resume after `--stop`
+
+By default (no `--new`), distillation first looks for the newest
+`distilled_model.pt`:
+
+1. local `distill_checkpoints/distilled_model.pt`;
+2. otherwise `hf.repo_id/distilled_model.pt` on HuggingFace.
+
+If found, it restores model weights, `step`, `tokens_seen`, the metrics
+history, and optimizer state when present. So this continues a stopped run:
+
+```python
+!python -m distill.distill --stop
+!python -m distill.distill --detach
+```
+
+To deliberately throw away that progress and restart from the original
+student (`minillm_latest.pt`), pass `--new`:
+
+```python
+!python -m distill.distill --detach --new
+```
+
+`--new` ignores both the local and HF `distilled_model.pt`.
 
 ## Running
 

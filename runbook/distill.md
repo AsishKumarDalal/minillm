@@ -197,7 +197,15 @@ Local:
 ```text
 distill_checkpoints/distilled_model.pt
 distilled_outs/metrics.json
+distilled_outs/token_seen_vs_loss.png
+distilled_outs/token_seen_vs_perplexity.png
+distilled_outs/token_seen_vs_ce.png
+distilled_outs/token_seen_vs_kl.png
 ```
+
+These are the four graphs: total loss, perplexity (from CE), cross-entropy,
+and KL divergence — all against tokens seen. With `--upload`, the whole
+`distilled_outs/` folder is pushed to HF under `distilled_outs/`.
 
 `metrics.json` records `step`, `tokens_seen`, `loss`, `ce`, `kl`, `alpha`,
 `temperature`, and `timestamp`.

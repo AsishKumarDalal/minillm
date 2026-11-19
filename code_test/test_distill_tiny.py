@@ -145,6 +145,14 @@ def test_distiller_end_to_end(tmpdir: str) -> None:
     metrics = Path(tmpdir) / "distilled_outs" / "metrics.json"
     assert checkpoint.exists(), checkpoint
     assert metrics.exists(), metrics
+    for name in (
+        "token_seen_vs_loss.png",
+        "token_seen_vs_perplexity.png",
+        "token_seen_vs_ce.png",
+        "token_seen_vs_kl.png",
+    ):
+        plot = Path(tmpdir) / "distilled_outs" / name
+        assert plot.exists() and plot.stat().st_size > 0, plot
 
     state = torch.load(checkpoint, map_location="cpu", weights_only=True)
     assert state["step"] == 3

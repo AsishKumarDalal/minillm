@@ -101,8 +101,9 @@ Run the tiny distillation tests (CPU, local 64-vocab teacher, no network):
 
 This checks CE/KL weighting with `alpha`, temperature scaling, a full
 distillation step loop, `distilled_model.pt` / `distilled_outs/metrics.json`
-save/load, resume from a previous distilled checkpoint, and the periodic fixed
-prompt sample. A smoke test with
+save/load, resume from a previous distilled checkpoint, the periodic fixed
+prompt sample, and the four `distilled_outs/` plots (loss, perplexity, CE, KL).
+A smoke test with
 a small real HuggingFace teacher (two steps on local text, no uploads) is also
 available:
 

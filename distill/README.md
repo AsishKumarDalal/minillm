@@ -211,7 +211,20 @@ Local:
 ```text
 distill_checkpoints/distilled_model.pt
 distilled_outs/metrics.json
+distilled_outs/token_seen_vs_loss.png
+distilled_outs/token_seen_vs_perplexity.png
+distilled_outs/token_seen_vs_ce.png
+distilled_outs/token_seen_vs_kl.png
 ```
+
+The four plots show total distillation loss, perplexity, cross-entropy, and
+KL divergence against tokens seen. Perplexity is computed from the CE term
+only (`exp(ce)`); `exp(total_loss)` would not be a perplexity because the
+total also contains the KL term.
+
+When `hf.enabled: true` / `--upload` is used, the whole `distilled_outs/`
+folder — metrics **and all four plots** — is uploaded to
+`sddfhy546y/minillm/distilled_outs/` alongside `distilled_model.pt`.
 
 `metrics.json` is a list of records with `step`, `tokens_seen`, `loss`, `ce`,
 `kl`, `alpha`, `temperature`, and `timestamp`.

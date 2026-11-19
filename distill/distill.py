@@ -58,6 +58,7 @@ if str(ROOT_DIR) not in sys.path:
 from model.model import GPT  # noqa: E402
 from pretrain.data import OpenWebTextTokenStream, get_encoder  # noqa: E402
 from pretrain.train import (  # noqa: E402
+    atomic_savefig,
     atomic_torch_save,
     atomic_write_text,
     choose_amp_dtype,
@@ -452,6 +453,65 @@ def _teacher_logits(
 
 
 # ---------------------------------------------------------------------------
+# Plots
+# ---------------------------------------------------------------------------
+def _plot_series(out_dir: Path, tokens: list[float], values: list[float],
+                 filename: str, title: str, ylabel: str) -> Optional[Path]:
+    """Write one line plot atomically and return its path."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    fig, ax = plt.subplots(figsize=(7.0, 4.0), dpi=120)
+    ax.plot(tokens, values, color="#2563eb", linewidth=1.8, marker="o", markersize=2.5)
+    ax.set_xlabel("Tokens seen")
+    ax.set_ylabel(ylabel)
+    ax.set_title(title)
+    ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+    path = out_dir / filename
+    atomic_savefig(fig, path, bbox_inches="tight")
+    plt.close(fig)
+    return path
+
+
+def save_distillation_plots(history: list[dict], out_dir: Path) -> list[Path]:
+    """Write loss/perplexity/CE/KL plots into ``distilled_outs``.
+
+    Perplexity is derived from the cross-entropy term only; the total loss
+    also contains the KL term, so exp(total) is not a perplexity.
+    """
+    if len(history) < 2:
+        return []
+    tokens = [float(entry.get("tokens_seen", 0)) for entry in history]
+    losses = [float(entry.get("loss", float("nan"))) for entry in history]
+    ces = [float(entry.get("ce", float("nan"))) for entry in history]
+    kls = [float(entry.get("kl", float("nan"))) for entry in history]
+    ppls = [
+        math.exp(min(ce, 50.0)) if math.isfinite(ce) and ce > 0 else float("nan")
+        for ce in ces
+    ]
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    files: list[Path] = []
+    specs = (
+        ("token_seen_vs_loss.png", "Total distillation loss", "Loss", losses),
+        ("token_seen_vs_perplexity.png", "Perplexity (from CE)", "Perplexity", ppls),
+        ("token_seen_vs_ce.png", "Cross-entropy loss", "CE loss", ces),
+        ("token_seen_vs_kl.png", "KL divergence to teacher", "KL loss", kls),
+    )
+    for filename, title, ylabel, values in specs:
+        try:
+            path = _plot_series(out_dir, tokens, values, filename, title, ylabel)
+            if path is not None:
+                files.append(path)
+        except Exception as exc:
+            logging.warning("Could not write %s: %s", filename, exc)
+    return files
+
+
+# ---------------------------------------------------------------------------
 # Distiller
 # ---------------------------------------------------------------------------
 class Distiller:
@@ -557,7 +617,12 @@ class Distiller:
 
     def write_outputs(self) -> list[Path]:
         atomic_write_text(self.metrics_path, json.dumps(self.history, indent=2))
-        return [self.metrics_path]
+        files: list[Path] = [self.metrics_path]
+        try:
+            files.extend(save_distillation_plots(self.history, self.out_dir))
+        except Exception as exc:
+            logging.warning("Could not write distillation plots: %s", exc)
+        return files
 
     def _log_sample(self, pbar=None) -> Optional[str]:
         """Generate a short continuation of a fixed prompt for eyeballing."""

@@ -13,8 +13,11 @@ from __future__ import annotations
 import logging
 import os
 import re
+import signal
+import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 import numpy as np
@@ -25,6 +28,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from model.model import GPT  # noqa: E402
+import pretrain.train as train_mod  # noqa: E402
 from pretrain.train import (  # noqa: E402
     Trainer,
     get_hf_settings,
@@ -32,6 +36,7 @@ from pretrain.train import (  # noqa: E402
     lr_for_step,
     model_config_mismatches,
     select_device,
+    stop_training,
     upload_checkpoint,
     upload_outputs,
 )
@@ -938,18 +943,21 @@ def test_final_sync_uploads_on_interrupt(tmpdir: str) -> None:
         device=device,
         model_cfg=MODEL_CFG,
         train_cfg=cfg,
-        hf_cfg={
-            "repo_id": "someone/minillm",
-            "token": "secret-token",
-            "filename": "minillm_latest.pt",
-            "out_dir": "out",
-            "private": True,
-        },
+        hf_cfg=None,
     )
+    # Train without HF first so the test never touches the real Hub.
     trainer.train(make_batches(num_steps=1, seed=1))
+    trainer.hf_cfg = {
+        "repo_id": "someone/minillm",
+        "token": "secret-token",
+        "filename": "minillm_latest.pt",
+        "out_dir": "out",
+        "private": True,
+    }
     # Pretend the periodic save/upload never happened (as on an interrupt).
     trainer.last_saved_step = 0
     trainer.last_uploaded_step = 0
+    trainer.last_outputs_uploaded_step = 0
     uploaded = []
     original = train_mod.upload_checkpoint
     original_outputs = train_mod.upload_outputs
@@ -969,7 +977,325 @@ def test_final_sync_uploads_on_interrupt(tmpdir: str) -> None:
     assert uploaded == [1], uploaded
     assert trainer.last_saved_step == 1
     assert trainer.last_uploaded_step == 1
+    assert trainer.last_outputs_uploaded_step == 1
     print("final sync uploads on interrupt OK")
+
+
+def test_output_upload_retried_after_checkpoint_success(tmpdir: str) -> None:
+    """A failed out/ upload is retried even when the model upload worked."""
+    import pretrain.train as train_mod
+
+    cfg = dict(TRAIN_CFG)
+    cfg.update(
+        {
+            "checkpoint_dir": str(Path(tmpdir) / "ckpt"),
+            "out_dir": str(Path(tmpdir) / "out"),
+            "max_steps": 1,
+            "progress": False,
+        }
+    )
+    device, _ = select_device(cfg)
+    model = GPT(MODEL_CFG)
+    trainer = Trainer(
+        model=model,
+        optimizer=torch.optim.AdamW(model.parameters(), lr=1e-3),
+        device=device,
+        model_cfg=MODEL_CFG,
+        train_cfg=cfg,
+        hf_cfg={
+            "repo_id": "someone/minillm",
+            "token": "secret-token",
+            "filename": "minillm_latest.pt",
+            "out_dir": "out",
+            "private": True,
+            "upload_retries": 1,
+            "upload_retry_backoff": 0.0,
+        },
+    )
+    trainer.step = 3
+    trainer.tokens_seen = 48
+    trainer.last_loss = 2.0
+    trainer.last_lr = 1e-3
+    trainer._record_metric(2.0, 1e-3)
+
+    checkpoint_calls: list[int] = []
+    output_calls: list[int] = []
+
+    def fake_checkpoint(path, hf, step):
+        checkpoint_calls.append(step)
+        return True
+
+    def fake_outputs(out_dir, hf, step):
+        output_calls.append(step)
+        return len(output_calls) > 1  # first upload fails, retry succeeds
+
+    original_checkpoint = train_mod.upload_checkpoint
+    original_outputs = train_mod.upload_outputs
+    train_mod.upload_checkpoint = fake_checkpoint
+    train_mod.upload_outputs = fake_outputs
+    try:
+        assert trainer.save_checkpoint()
+        assert trainer.last_uploaded_step == 3
+        assert trainer.last_outputs_uploaded_step == 0, (
+            "failed out/ upload must not be marked as uploaded"
+        )
+
+        trainer.final_sync()
+    finally:
+        train_mod.upload_checkpoint = original_checkpoint
+        train_mod.upload_outputs = original_outputs
+
+    assert output_calls == [3, 3], output_calls
+    assert checkpoint_calls == [3], checkpoint_calls
+    assert trainer.last_outputs_uploaded_step == 3
+    print("out/ upload retried independently of the model upload OK")
+
+
+def test_final_sync_defers_repeated_interrupts(tmpdir: str) -> None:
+    """Ctrl+C while the final save/upload runs must not abort the sync."""
+    import pretrain.train as train_mod
+
+    cfg = dict(TRAIN_CFG)
+    cfg.update(
+        {
+            "checkpoint_dir": str(Path(tmpdir) / "ckpt"),
+            "out_dir": str(Path(tmpdir) / "out"),
+            "max_steps": 1,
+            "progress": False,
+        }
+    )
+    device, _ = select_device(cfg)
+    model = GPT(MODEL_CFG)
+    trainer = Trainer(
+        model=model,
+        optimizer=torch.optim.AdamW(model.parameters(), lr=1e-3),
+        device=device,
+        model_cfg=MODEL_CFG,
+        train_cfg=cfg,
+        hf_cfg=None,
+    )
+    trainer.train(make_batches(num_steps=1, seed=1))
+    trainer.hf_cfg = {
+        "repo_id": "someone/minillm",
+        "token": "secret-token",
+        "filename": "minillm_latest.pt",
+        "out_dir": "out",
+        "private": True,
+    }
+    # Pretend the periodic save/upload never happened (as on an interrupt).
+    trainer.last_saved_step = 0
+    trainer.last_uploaded_step = 0
+    trainer.last_outputs_uploaded_step = 0
+
+    events: list[str] = []
+
+    def fake_outputs(out_dir, hf, step):
+        events.append("out")
+        signal.raise_signal(signal.SIGINT)
+        return True
+
+    def fake_checkpoint(path, hf, step):
+        events.append("model")
+        signal.raise_signal(signal.SIGINT)
+        return True
+
+    previous_int = signal.getsignal(signal.SIGINT)
+    previous_term = signal.getsignal(signal.SIGTERM)
+    original_checkpoint = train_mod.upload_checkpoint
+    original_outputs = train_mod.upload_outputs
+    train_mod.upload_checkpoint = fake_checkpoint
+    train_mod.upload_outputs = fake_outputs
+    try:
+        trainer.final_sync()
+    finally:
+        train_mod.upload_checkpoint = original_checkpoint
+        train_mod.upload_outputs = original_outputs
+
+    assert events == ["out", "model"], events
+    assert trainer.last_saved_step == 1
+    assert trainer.last_uploaded_step == 1
+    assert trainer.last_outputs_uploaded_step == 1
+    assert signal.getsignal(signal.SIGINT) is previous_int
+    assert signal.getsignal(signal.SIGTERM) is previous_term
+    print("final sync survives repeated Ctrl+C and restores handlers OK")
+
+
+def test_atomic_checkpoint_save_removes_stale_tmp(tmpdir: str) -> None:
+    """An interrupted save must not leave a .tmp file that confuses resume."""
+    trainer = build_trainer(tmpdir, max_steps=1)
+    trainer.step = 1
+    trainer.tokens_seen = 8
+    trainer.last_loss = 2.0
+    trainer.last_lr = 1e-3
+    trainer._record_metric(2.0, 1e-3)
+
+    stale = trainer.checkpoint_path.with_name(trainer.checkpoint_path.name + ".tmp")
+    stale.write_bytes(b"partial checkpoint")
+    pid_tmp = trainer.checkpoint_path.with_name(
+        f"{trainer.checkpoint_path.name}.tmp.{os.getpid()}"
+    )
+    pid_tmp.write_bytes(b"another partial checkpoint")
+
+    assert trainer.save_checkpoint(upload=False)
+    assert trainer.checkpoint_path.exists()
+    assert not stale.exists(), stale
+    assert not pid_tmp.exists(), pid_tmp
+
+    saved = torch.load(trainer.checkpoint_path, map_location="cpu", weights_only=True)
+    assert saved["step"] == 1
+    assert saved["tokens_seen"] == 8
+    print("atomic checkpoint save removes stale .tmp files OK")
+
+
+def test_upload_retries_transient_errors(tmpdir: str) -> None:
+    import huggingface_hub
+
+    path = Path(tmpdir) / "minillm_latest.pt"
+    path.write_bytes(b"tiny fake checkpoint")
+
+    class FlakyApi:
+        attempts = 0
+
+        def __init__(self, token=None):
+            pass
+
+        def create_repo(self, **kwargs):
+            pass
+
+        def upload_file(self, **kwargs):
+            FlakyApi.attempts += 1
+            if FlakyApi.attempts == 1:
+                raise RuntimeError("temporary network error")
+
+    hf = {
+        "repo_id": "someone/minillm",
+        "token": "secret-token",
+        "filename": "minillm_latest.pt",
+        "out_dir": "out",
+        "private": True,
+        "upload_retries": 2,
+        "upload_retry_backoff": 0.0,
+    }
+
+    original = huggingface_hub.HfApi
+    huggingface_hub.HfApi = FlakyApi
+    try:
+        assert upload_checkpoint(path, hf, step=1)
+    finally:
+        huggingface_hub.HfApi = original
+
+    assert FlakyApi.attempts == 2, FlakyApi.attempts
+    print("transient HF upload error retried OK")
+
+
+def test_detached_stop_signal(tmpdir: str) -> None:
+    if not sys.platform.startswith("linux"):
+        print("detached --stop test skipped (needs /proc)")
+        return
+
+    cfg = {"checkpoint_dir": tmpdir}
+    pid_file = Path(tmpdir) / "train.pid"
+    proc = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(60)", "pretrain.train"],
+    )
+    try:
+        time.sleep(0.2)
+        pid_file.write_text(str(proc.pid))
+        assert stop_training(cfg, timeout=5.0) == 0
+        proc.wait(timeout=5)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=5)
+
+    # A PID file left by a dead process is stale: --stop removes it.
+    pid_file.write_text(str(proc.pid))
+    assert stop_training(cfg, timeout=1.0) == 1
+    assert not pid_file.exists()
+    print("detached --stop sends SIGTERM and cleans stale PID OK")
+
+
+def test_periodic_checkpoint_upload(tmpdir: str) -> None:
+    interval_seconds = 2.0
+    cfg = dict(TRAIN_CFG)
+    cfg["checkpoint_dir"] = tmpdir
+    cfg["out_dir"] = str(Path(tmpdir) / "out")
+    cfg["max_steps"] = None
+    cfg["checkpoint_interval_minutes"] = interval_seconds / 60.0
+    cfg["progress"] = False
+    cfg["log_interval"] = 100
+    cfg["save_optimizer"] = False
+
+    device, num_gpus = select_device(cfg)
+    assert device.type == "cpu" and num_gpus == 0
+    model = GPT(MODEL_CFG).to(device)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+    hf = {
+        "repo_id": "someone/minillm",
+        "token": "not-used",
+        "token_env": "HF_TOKEN",
+        "filename": "minillm_latest.pt",
+        "out_dir": "out",
+        "private": True,
+        "upload_retries": 1,
+        "upload_retry_backoff": 0.0,
+    }
+    trainer = Trainer(
+        model=model,
+        optimizer=optimizer,
+        device=device,
+        model_cfg=MODEL_CFG,
+        train_cfg=cfg,
+        hf_cfg=hf,
+    )
+
+    uploads: dict[str, list[tuple[float, int]]] = {"model": [], "out": []}
+    original_model = train_mod.upload_checkpoint
+    original_out = train_mod.upload_outputs
+
+    def fake_model(path, hf_cfg, step):
+        uploads["model"].append((time.monotonic(), step))
+        return True
+
+    def fake_out(output_dir, hf_cfg, step):
+        uploads["out"].append((time.monotonic(), step))
+        return True
+
+    deadline = time.monotonic() + 35.0
+
+    def batches():
+        rng = np.random.default_rng(7)
+        shape = (2, 8)
+        while len(uploads["model"]) < 2 and time.monotonic() < deadline:
+            x = rng.integers(
+                0, MODEL_CFG["vocab_size"], size=shape, dtype=np.int32
+            )
+            y = rng.integers(
+                0, MODEL_CFG["vocab_size"], size=shape, dtype=np.int32
+            )
+            yield x, y
+
+    train_mod.upload_checkpoint = fake_model
+    train_mod.upload_outputs = fake_out
+    try:
+        trainer.train(batches())
+    finally:
+        train_mod.upload_checkpoint = original_model
+        train_mod.upload_outputs = original_out
+
+    assert len(uploads["model"]) >= 2, uploads
+    assert len(uploads["out"]) >= 2, uploads
+    first, second = uploads["model"][:2]
+    gap = second[0] - first[0]
+    assert 1.5 <= gap <= 4.0, gap
+    for (output_time, _), (model_time, _) in zip(
+        uploads["out"][:2], uploads["model"][:2]
+    ):
+        assert output_time <= model_time
+    print(
+        f"periodic checkpoint upload every {interval_seconds:.0f}s OK "
+        f"(gap {gap:.1f}s)"
+    )
 
 
 def main() -> None:
@@ -995,6 +1321,18 @@ def main() -> None:
         test_time_limit_stops_saves_and_uploads(tmpdir)
     with tempfile.TemporaryDirectory() as tmpdir:
         test_final_sync_uploads_on_interrupt(tmpdir)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        test_output_upload_retried_after_checkpoint_success(tmpdir)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        test_final_sync_defers_repeated_interrupts(tmpdir)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        test_atomic_checkpoint_save_removes_stale_tmp(tmpdir)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        test_upload_retries_transient_errors(tmpdir)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        test_detached_stop_signal(tmpdir)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        test_periodic_checkpoint_upload(tmpdir)
     test_lr_schedule()
     test_env_file()
     test_hf_settings_warnings()

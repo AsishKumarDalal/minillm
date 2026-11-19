@@ -58,18 +58,32 @@ Usage
 
     # Stop after 15M tokens; the bar counts toward that budget
     .venv/bin/python -m pretrain.train --budget 15000000
+
+    # Testing only: save/upload every 10 seconds instead of 60 minutes
+    .venv/bin/python -m pretrain.train --checkpoint-seconds 10
+
+    # Notebook-safe run: start in a separate session, then stop cleanly.
+    # A plain ``!python -m pretrain.train`` is force-killed by Jupyter
+    # 0.2s after Ctrl+C, before the final upload can finish.
+    .venv/bin/python -m pretrain.train --check-hf
+    .venv/bin/python -m pretrain.train --detach --new
+    .venv/bin/python -m pretrain.train --status
+    .venv/bin/python -m pretrain.train --stop
 """
 
 from __future__ import annotations
 
 import argparse
+import atexit
 import contextlib
+import io
 import json
 import logging
 import math
 import os
 import random
 import signal
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -264,6 +278,99 @@ def make_grad_scaler(
     return torch.amp.GradScaler(device_type, enabled=enabled)
 
 
+@contextlib.contextmanager
+def defer_signals(*signums: int, raise_pending: bool = True):
+    """Defer SIGINT/SIGTERM instead of raising while artifacts sync.
+
+    A 100M-parameter checkpoint plus optimizer is ~1.2 GB, so the final save
+    and upload can take minutes. A second Ctrl+C (or a notebook stop request)
+    during that window must not abort the upload and leave the Hub with only
+    the model or only the ``out/`` files. Signals received inside this block
+    are remembered; after the block they either raise ``KeyboardInterrupt``
+    (so a signal during a periodic save still stops training) or are logged
+    and swallowed (``raise_pending=False``, used by the final exit sync).
+    """
+    installed: dict[int, object] = {}
+    pending: list[int] = []
+
+    def _remember(signum, _frame):
+        pending.append(signum)
+        logging.warning(
+            "Received signal %d while finishing the final save/upload; "
+            "deferring it until the sync completes.",
+            signum,
+        )
+
+    for signum in signums:
+        try:
+            installed[signum] = signal.getsignal(signum)
+            signal.signal(signum, _remember)
+        except (ValueError, OSError):
+            # Signal handlers can only be installed in the main thread.
+            pass
+
+    try:
+        yield
+    finally:
+        for signum, previous in installed.items():
+            try:
+                signal.signal(signum, previous)
+            except (ValueError, OSError):
+                pass
+        if pending:
+            logging.info(
+                "Final sync finished; handled deferred signal(s): %s.",
+                ", ".join(str(signum) for signum in pending),
+            )
+            if raise_pending:
+                raise KeyboardInterrupt(
+                    "deferred signal(s): "
+                    + ", ".join(str(signum) for signum in pending)
+                )
+
+
+def atomic_torch_save(state: dict, path: Path) -> None:
+    """Write a checkpoint atomically, removing the temp file on any failure."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(f"{path.name}.tmp.{os.getpid()}")
+    try:
+        with open(tmp_path, "wb") as handle:
+            torch.save(state, handle)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_path, path)
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            tmp_path.unlink()
+
+
+def atomic_write_text(path: Path, text: str) -> None:
+    """Write a small file atomically so an upload never sees a partial file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(f"{path.name}.tmp.{os.getpid()}")
+    try:
+        with open(tmp_path, "w") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_path, path)
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            tmp_path.unlink()
+
+
+def atomic_savefig(fig, path: Path, **kwargs) -> None:
+    """Save a matplotlib figure atomically."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(f"{path.name}.tmp.{os.getpid()}")
+    try:
+        fig.savefig(tmp_path, format=path.suffix.lstrip(".") or "png", **kwargs)
+        os.replace(tmp_path, path)
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            tmp_path.unlink()
+
+
 def unwrap_model(model: nn.Module) -> nn.Module:
     return model.module if isinstance(model, nn.DataParallel) else model
 
@@ -324,13 +431,13 @@ def get_hf_settings(cfg: dict, disable: bool = False) -> Optional[dict]:
     if not repo_id:
         logging.warning(
             "HF repo_id is empty in configs/pretrain.yaml; "
-            "remote checkpoint sync is disabled. Training will continue."
+            "remote checkpoint sync is disabled."
         )
         return None
     if not token:
         logging.warning(
             "HF token environment variable %r is not set (checked .env); "
-            "remote checkpoint sync is disabled. Training will continue.",
+            "remote checkpoint sync is disabled.",
             token_env,
         )
         return None
@@ -346,7 +453,46 @@ def get_hf_settings(cfg: dict, disable: bool = False) -> Optional[dict]:
         "filename": str(hf.get("filename", "minillm_latest.pt")),
         "out_dir": out_dir,
         "private": bool(hf.get("private", True)),
+        "upload_retries": max(1, int(hf.get("upload_retries", 3))),
+        "upload_retry_backoff": max(0.0, float(hf.get("upload_retry_backoff", 2.0))),
     }
+
+
+def _is_permanent_upload_error(exc: Exception) -> bool:
+    """True for auth/not-found errors that retrying cannot fix."""
+    status = getattr(getattr(exc, "response", None), "status_code", None)
+    return status in (400, 401, 403, 404)
+
+
+def _retry_upload(description: str, action, hf: dict) -> bool:
+    """Run one Hub upload with bounded retries for transient failures."""
+    retries = max(1, int(hf.get("upload_retries", 3)))
+    backoff = max(0.0, float(hf.get("upload_retry_backoff", 2.0)))
+
+    for attempt in range(1, retries + 1):
+        try:
+            action()
+            return True
+        except KeyboardInterrupt:
+            raise
+        except Exception as exc:
+            if _is_permanent_upload_error(exc) or attempt >= retries:
+                logging.warning(
+                    "%s failed after %d attempt(s): %s", description, attempt, exc
+                )
+                return False
+            delay = backoff * (2 ** (attempt - 1))
+            logging.warning(
+                "%s failed (attempt %d/%d): %s; retrying in %.1fs.",
+                description,
+                attempt,
+                retries,
+                exc,
+                delay,
+            )
+            time.sleep(delay)
+
+    return False
 
 
 def download_checkpoint(hf: dict, checkpoint_dir: Path) -> Optional[Path]:
@@ -405,7 +551,18 @@ def upload_checkpoint(path: Path, hf: dict, step: int) -> bool:
         )
         return False
 
-    try:
+    if not path.exists():
+        logging.warning("Checkpoint %s does not exist; upload skipped.", path)
+        return False
+
+    path_in_repo = str(hf.get("filename", "minillm_latest.pt")).strip().lstrip("/")
+    if not path_in_repo:
+        logging.warning("hf.filename is empty; checkpoint upload skipped.")
+        return False
+
+    size_mb = path.stat().st_size / (1024 * 1024)
+
+    def _upload() -> None:
         api = HfApi(token=hf["token"])
         api.create_repo(
             repo_id=hf["repo_id"],
@@ -413,30 +570,30 @@ def upload_checkpoint(path: Path, hf: dict, step: int) -> bool:
             private=hf["private"],
             exist_ok=True,
         )
-        size_mb = path.stat().st_size / (1024 * 1024)
         logging.info(
             "Uploading %.1f MB to %s/%s ...",
             size_mb,
             hf["repo_id"],
-            hf["filename"],
+            path_in_repo,
         )
         # Uploading to the same path replaces the previous file in one commit.
         api.upload_file(
             path_or_fileobj=str(path),
-            path_in_repo=hf["filename"],
+            path_in_repo=path_in_repo,
             repo_id=hf["repo_id"],
             repo_type="model",
-            commit_message=f"Update {hf['filename']} at step {step}",
+            commit_message=f"Update {path_in_repo} at step {step}",
         )
-        logging.info(
-            "Uploaded %s to %s (replaced previous file if it existed).",
-            hf["filename"],
-            hf["repo_id"],
-        )
-        return True
-    except Exception as exc:
-        logging.warning("HF upload failed: %s", exc)
+
+    if not _retry_upload(f"HF checkpoint upload {path_in_repo}", _upload, hf):
         return False
+
+    logging.info(
+        "Uploaded %s to %s (replaced previous file if it existed).",
+        path_in_repo,
+        hf["repo_id"],
+    )
+    return True
 
 
 def upload_outputs(output_dir: Path, hf: dict, step: int) -> bool:
@@ -455,8 +612,9 @@ def upload_outputs(output_dir: Path, hf: dict, step: int) -> bool:
         logging.info("No output files to upload.")
         return True
 
-    out_dir = str(hf.get("out_dir", "out")).strip().strip("/") or "out"
-    try:
+    out_dir = str(hf.get("out_dir", "out")).strip().strip("/").lstrip("/") or "out"
+
+    def _upload() -> None:
         api = HfApi(token=hf["token"])
         api.create_repo(
             repo_id=hf["repo_id"],
@@ -477,11 +635,12 @@ def upload_outputs(output_dir: Path, hf: dict, step: int) -> bool:
             repo_type="model",
             commit_message=f"Update training metrics and plots at step {step}",
         )
-        logging.info("Uploaded output files to %s/%s.", hf["repo_id"], out_dir)
-        return True
-    except Exception as exc:
-        logging.warning("HF output upload failed: %s", exc)
+
+    if not _retry_upload(f"HF output upload to {out_dir}", _upload, hf):
         return False
+
+    logging.info("Uploaded output files to %s/%s.", hf["repo_id"], out_dir)
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -534,13 +693,28 @@ class Trainer:
         self.last_sample_text: Optional[str] = None
         self.nonfinite_streak = 0
         # Used by the final sync so every exit path (Ctrl+C, SIGTERM, crash,
-        # normal stop) ends with the newest finite checkpoint on HF.
+        # normal stop) ends with the newest finite checkpoint on HF. The model
+        # and the out/ files are tracked separately: losing one upload must
+        # never mark the other one as already uploaded.
         self.last_saved_step = 0
         self.last_uploaded_step = 0
+        self.last_outputs_uploaded_step = 0
+        self._remove_stale_checkpoint_temps()
 
         self.amp_dtype = choose_amp_dtype(device, train_cfg)
         self.use_amp = self.amp_dtype is not None
         self.scaler = make_grad_scaler(device, self.use_amp, self.amp_dtype)
+
+    def _remove_stale_checkpoint_temps(self) -> None:
+        """Remove temp checkpoints left by an interrupted save."""
+        for stale in self.checkpoint_dir.glob(f"{self.checkpoint_path.name}.tmp*"):
+            try:
+                stale.unlink()
+                logging.info("Removed stale checkpoint temp file: %s", stale)
+            except OSError as exc:
+                logging.warning(
+                    "Could not remove stale checkpoint temp %s: %s", stale, exc
+                )
 
     # -- checkpoint loading -------------------------------------------------
     def resume(self) -> bool:
@@ -925,7 +1099,7 @@ class Trainer:
             if log_scale:
                 ax.set_yscale("log")
             fig.tight_layout()
-            fig.savefig(path, bbox_inches="tight")
+            atomic_savefig(fig, path, bbox_inches="tight")
             plt.close(fig)
             files.append(path)
 
@@ -1012,7 +1186,7 @@ class Trainer:
 
             fig.suptitle("Training curves")
             fig.tight_layout()
-            fig.savefig(curves_path, bbox_inches="tight")
+            atomic_savefig(fig, curves_path, bbox_inches="tight")
             plt.close(fig)
             files.append(curves_path)
 
@@ -1024,7 +1198,7 @@ class Trainer:
         files: list[Path] = []
 
         try:
-            self.metrics_path.write_text(json.dumps(self.history, indent=2))
+            atomic_write_text(self.metrics_path, json.dumps(self.history, indent=2))
             files.append(self.metrics_path)
         except Exception as exc:
             logging.warning("Could not write metrics %s: %s", self.metrics_path, exc)
@@ -1037,7 +1211,27 @@ class Trainer:
         return files
 
     # -- checkpoint saving --------------------------------------------------
-    def save_checkpoint(self) -> bool:
+    def sync_to_hf(
+        self, *, checkpoint: bool = True, outputs: bool = True
+    ) -> None:
+        """Upload artifacts independently and record each result.
+
+        The ``out/`` files are small, so they go first. If the large model
+        upload is aborted, the plots and metrics still land. A failed model
+        upload never marks the outputs as uploaded (and vice versa), which is
+        what allows :meth:`final_sync` to retry only the missing half.
+        """
+        if not self.hf_cfg:
+            return
+        if outputs and self.last_outputs_uploaded_step != self.step:
+            if upload_outputs(self.out_dir, self.hf_cfg, self.step):
+                self.last_outputs_uploaded_step = self.step
+        if checkpoint and self.last_uploaded_step != self.step:
+            if upload_checkpoint(self.checkpoint_path, self.hf_cfg, self.step):
+                self.last_uploaded_step = self.step
+
+    def save_checkpoint(self, upload: bool = True) -> bool:
+        self._remove_stale_checkpoint_temps()
         model_state = unwrap_model(self.model).state_dict()
         bad_tensors = self._nonfinite_tensors(model_state)
         if bad_tensors:
@@ -1072,10 +1266,8 @@ class Trainer:
         if torch.cuda.is_available():
             state["cuda_rng_state_all"] = torch.cuda.get_rng_state_all()
 
-        tmp_path = self.checkpoint_path.with_name(self.checkpoint_path.name + ".tmp")
         try:
-            torch.save(state, tmp_path)
-            os.replace(tmp_path, self.checkpoint_path)
+            atomic_torch_save(state, self.checkpoint_path)
         except Exception as exc:
             logging.warning("Could not save local checkpoint: %s", exc)
             return False
@@ -1093,13 +1285,8 @@ class Trainer:
         )
 
         self.last_saved_step = self.step
-        if self.hf_cfg:
-            uploaded = upload_checkpoint(
-                self.checkpoint_path, self.hf_cfg, self.step
-            )
-            upload_outputs(self.out_dir, self.hf_cfg, self.step)
-            if uploaded:
-                self.last_uploaded_step = self.step
+        if upload and self.hf_cfg:
+            self.sync_to_hf()
 
         self.last_checkpoint_time = time.monotonic()
         return True
@@ -1111,18 +1298,47 @@ class Trainer:
         re-uploads if the periodic upload failed. On Ctrl+C, SIGTERM, or a
         crash it performs the save itself. ``save_checkpoint()`` refuses
         non-finite weights, so a diverged model is never uploaded.
+
+        SIGINT/SIGTERM are deferred for the whole sync: pressing Ctrl+C again
+        while the 1.2 GB checkpoint uploads must not abort it or skip the
+        ``out/`` upload. The checkpoint and ``out/`` uploads are retried
+        independently, so a failure of one never prevents the other.
         """
         if self.step <= 0:
             return
-        if self.last_saved_step != self.step and not self.save_checkpoint():
-            return
-        if self.hf_cfg and self.last_uploaded_step != self.step:
-            uploaded = upload_checkpoint(
-                self.checkpoint_path, self.hf_cfg, self.step
-            )
-            upload_outputs(self.out_dir, self.hf_cfg, self.step)
-            if uploaded:
-                self.last_uploaded_step = self.step
+
+        with defer_signals(
+            signal.SIGINT, signal.SIGTERM, raise_pending=False
+        ):
+            saved = self.last_saved_step == self.step
+            if not saved:
+                saved = self.save_checkpoint(upload=False)
+
+            if not saved:
+                # The model diverged (non-finite weights), but the metrics
+                # and plots for the latest steps are still worth uploading.
+                self.write_outputs()
+
+            if self.hf_cfg:
+                self.sync_to_hf(checkpoint=saved, outputs=True)
+                logging.info(
+                    "Final sync at step %d: local checkpoint %s, model %s, "
+                    "out/ %s.",
+                    self.step,
+                    "saved" if saved else "skipped (non-finite weights)",
+                    "uploaded"
+                    if self.last_uploaded_step == self.step
+                    else "not uploaded",
+                    "uploaded"
+                    if self.last_outputs_uploaded_step == self.step
+                    else "not uploaded",
+                )
+            else:
+                logging.info(
+                    "Final sync at step %d: local checkpoint %s (HF disabled).",
+                    self.step,
+                    "saved" if saved else "skipped (non-finite weights)",
+                )
 
     # -- main loop ----------------------------------------------------------
     def train(self, batches: Iterable[tuple[np.ndarray, np.ndarray]]) -> None:
@@ -1471,7 +1687,300 @@ class Trainer:
         finally:
             pbar.close()
             if self.step > 0 and not failed:
-                self.save_checkpoint()
+                # This is the Ctrl+C/exit path. Defer further interrupts
+                # until the local save and both HF uploads have finished.
+                with defer_signals(signal.SIGINT, signal.SIGTERM):
+                    self.save_checkpoint()
+
+
+# ---------------------------------------------------------------------------
+# Background runner (Jupyter-safe Ctrl+C)
+# ---------------------------------------------------------------------------
+def _pid_file_path(pretrain_cfg: dict) -> Path:
+    checkpoint_dir = resolve_path(pretrain_cfg.get("checkpoint_dir", "checkpoints"))
+    return checkpoint_dir / "train.pid"
+
+
+def _read_pid(path: Path) -> Optional[int]:
+    try:
+        return int(path.read_text().strip())
+    except (OSError, ValueError):
+        return None
+
+
+def _pid_is_trainer(pid: int) -> bool:
+    """True when ``pid`` exists and looks like this training process."""
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    try:
+        cmdline = Path(f"/proc/{pid}/cmdline").read_bytes()
+    except OSError:
+        # /proc is Linux-only; if it is unavailable assume the PID is live.
+        return True
+    return b"pretrain.train" in cmdline or b"pretrain/train.py" in cmdline
+
+
+def _latest_log() -> Optional[Path]:
+    log_dir = ROOT_DIR / "logs"
+    try:
+        logs = sorted(
+            log_dir.glob("pretrain-*.log"),
+            key=lambda path: path.stat().st_mtime,
+        )
+    except OSError:
+        return None
+    return logs[-1] if logs else None
+
+
+def _tail(path: Path, lines: int = 20) -> str:
+    try:
+        content = path.read_text(errors="replace").splitlines()
+    except OSError:
+        return ""
+    return "\n".join(content[-lines:])
+
+
+def _remove_pid_file_if_ours(path: Path) -> None:
+    try:
+        if path.read_text().strip() == str(os.getpid()):
+            path.unlink()
+    except OSError:
+        pass
+
+
+def check_hf(pretrain_cfg: dict, no_hf: bool = False) -> int:
+    """Check token, repo, and write access without starting training."""
+    load_env_file(ROOT_DIR / ".env")
+    hf = pretrain_cfg.get("hf") or {}
+    repo_id = str(hf.get("repo_id", "")).strip()
+    token_env = str(hf.get("token_env", "HF_TOKEN")).strip()
+    token = os.environ.get(token_env, "").strip()
+
+    print(f"HF repo: {repo_id or '(not set)'}")
+    print(f"Token: {token_env} is {'set' if token else 'NOT set'}")
+    if no_hf:
+        print("Result: DISABLED (--no-hf was passed).")
+        return 1
+    if not repo_id:
+        print("Result: DISABLED (hf.repo_id is empty in configs/pretrain.yaml).")
+        return 1
+    if not token:
+        print(f"Result: DISABLED ({token_env} is not set).")
+        print("Set it in the notebook, or put it in .env, then re-run --check-hf.")
+        return 1
+
+    try:
+        from huggingface_hub import HfApi
+
+        api = HfApi(token=token)
+        who = api.whoami()
+        user = who.get("name") or who.get("user") or "unknown"
+        print(f"Authenticated as: {user}")
+
+        try:
+            info = api.repo_info(repo_id=repo_id, repo_type="model")
+        except Exception as exc:
+            status = getattr(getattr(exc, "response", None), "status_code", None)
+            if status == 404:
+                print(
+                    f"Repo: {repo_id} does not exist yet; "
+                    "the first upload will create it."
+                )
+            else:
+                raise
+        else:
+            print(
+                f"Repo: {repo_id} exists "
+                f"(last modified {info.last_modified})."
+            )
+
+        try:
+            api.auth_check(repo_id=repo_id, repo_type="model", write=True)
+            print("Write access: OK")
+        except Exception as exc:
+            status = getattr(getattr(exc, "response", None), "status_code", None)
+            if status == 404:
+                print(
+                    "Write access: repo does not exist yet; cannot verify "
+                    "until the first upload."
+                )
+            else:
+                raise
+
+        print("Result: HF upload is configured. Training uploads will run.")
+        return 0
+    except Exception as exc:
+        print(f"Result: FAILED: {exc}")
+        print("Fix the token or repo permissions; training would not upload.")
+        return 1
+
+
+def show_status(pretrain_cfg: dict) -> int:
+    checkpoint_dir = resolve_path(pretrain_cfg.get("checkpoint_dir", "checkpoints"))
+    pid_file = _pid_file_path(pretrain_cfg)
+    pid = _read_pid(pid_file)
+    running = bool(pid and _pid_is_trainer(pid))
+
+    print(f"Training: {'RUNNING (pid %d)' % pid if running else 'not running'}")
+    if pid and not running:
+        print(f"Stale PID file: {pid_file}")
+    if running:
+        print(f"PID file: {pid_file}")
+
+    log_path = _latest_log()
+    if log_path is not None:
+        print(f"Log: {log_path}")
+        tail = _tail(log_path, 20)
+        if tail:
+            print("--- last log lines ---")
+            print(tail)
+
+    filename = str(
+        (pretrain_cfg.get("hf") or {}).get("filename", "minillm_latest.pt")
+    )
+    checkpoint = checkpoint_dir / filename
+    if checkpoint.exists():
+        stat = checkpoint.stat()
+        when = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(stat.st_mtime))
+        print(f"Checkpoint: {checkpoint} ({stat.st_size / 1024**2:.1f} MB, {when})")
+    else:
+        print(f"Checkpoint: none at {checkpoint}")
+
+    metrics = resolve_path(pretrain_cfg.get("out_dir", "out")) / "metrics.json"
+    if metrics.exists():
+        stat = metrics.stat()
+        when = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(stat.st_mtime))
+        print(f"Metrics: {metrics} ({when})")
+    return 0
+
+
+def start_detached_training(
+    args: argparse.Namespace,
+    raw_argv: list[str],
+    pretrain_cfg: dict,
+) -> int:
+    """Start training in its own session so notebook Ctrl+C cannot kill it."""
+    checkpoint_dir = resolve_path(pretrain_cfg.get("checkpoint_dir", "checkpoints"))
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    pid_file = checkpoint_dir / "train.pid"
+
+    existing = _read_pid(pid_file)
+    if existing and _pid_is_trainer(existing):
+        print(f"Training is already running (pid {existing}).")
+        print("Use --status to inspect it or --stop to stop it.")
+        return 1
+    if pid_file.exists():
+        try:
+            pid_file.unlink()
+        except OSError:
+            pass
+
+    if args.log_file is not None:
+        log_path = Path(args.log_file).expanduser()
+        if not log_path.is_absolute():
+            log_path = ROOT_DIR / log_path
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+    else:
+        log_dir = ROOT_DIR / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_path = log_dir / time.strftime("pretrain-%Y%m%d-%H%M%S.log")
+
+    child_argv = [arg for arg in raw_argv if arg != "--detach"]
+    env = os.environ.copy()
+    env["MINILLM_PID_FILE"] = str(pid_file)
+    env["PYTHONUNBUFFERED"] = "1"
+
+    with open(log_path, "ab", buffering=0) as log_file:
+        proc = subprocess.Popen(
+            [sys.executable, "-m", "pretrain.train", *child_argv],
+            cwd=str(ROOT_DIR),
+            stdin=subprocess.DEVNULL,
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+            env=env,
+            close_fds=True,
+        )
+    try:
+        pid_file.write_text(str(proc.pid))
+    except OSError as exc:
+        print(f"Warning: could not write PID file {pid_file}: {exc}")
+
+    # Catch immediate failures (bad config/import) before returning. Imports
+    # can take a few seconds, so give the child a short grace period.
+    deadline = time.monotonic() + 3.0
+    while time.monotonic() < deadline:
+        returncode = proc.poll()
+        if returncode is not None:
+            try:
+                pid_file.unlink()
+            except OSError:
+                pass
+            print(f"Training exited immediately with code {returncode}.")
+            print(f"Log: {log_path}")
+            tail = _tail(log_path, 30)
+            if tail:
+                print("--- last log lines ---")
+                print(tail)
+            return 1
+        time.sleep(0.1)
+
+    print(f"Training started in the background: pid {proc.pid}")
+    print(f"Log: {log_path}")
+    print(f"PID file: {pid_file}")
+    print("Check:  python -m pretrain.train --status")
+    print("Stop:   python -m pretrain.train --stop")
+    print(
+        "The trainer runs in its own session, so Ctrl+C in this notebook "
+        "will not kill it; --stop asks it to save and upload before exit."
+    )
+    return 0
+
+
+def stop_training(pretrain_cfg: dict, timeout: float = 10.0) -> int:
+    """Ask a detached trainer to stop; it saves/uploads in its signal handler."""
+    pid_file = _pid_file_path(pretrain_cfg)
+    pid = _read_pid(pid_file)
+    if not pid or not _pid_is_trainer(pid):
+        print(f"No running training found (PID file: {pid_file}).")
+        if pid_file.exists():
+            print("The PID file is stale; removing it.")
+            try:
+                pid_file.unlink()
+            except OSError:
+                pass
+        return 1
+
+    print(f"Sending SIGTERM to training pid {pid}.")
+    print(
+        "It will stop after the current step, save locally, and upload "
+        "the model and out/ files before exiting."
+    )
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        print("The process already exited.")
+        return 0
+
+    deadline = time.monotonic() + max(0.0, timeout)
+    while time.monotonic() < deadline:
+        if not _pid_is_trainer(pid):
+            print("Training exited.")
+            return 0
+        time.sleep(0.2)
+
+    print("Training is still running (the final save/upload can take minutes).")
+    print("It is detached, so you can close this cell; it will finish on its own.")
+    log_path = _latest_log()
+    if log_path is not None:
+        print(f"Watch: {log_path}")
+    return 0
 
 
 # ---------------------------------------------------------------------------
@@ -1482,8 +1991,20 @@ def run_training(
     model_cfg: dict,
     no_hf: bool = False,
     new_run: bool = False,
+    require_hf: bool = False,
 ) -> None:
     load_env_file(ROOT_DIR / ".env")
+
+    pid_file = os.environ.get("MINILLM_PID_FILE", "").strip()
+    if pid_file:
+        atexit.register(_remove_pid_file_if_ours, Path(pid_file))
+    elif os.environ.get("JPY_PARENT_PID"):
+        logging.warning(
+            "This looks like a notebook `!python ...` run. Jupyter "
+            "force-kills that child 0.2s after Ctrl+C, before the final "
+            "upload can finish. Use `python -m pretrain.train --detach ...` "
+            "and stop it with `python -m pretrain.train --stop`."
+        )
 
     seed = int(pretrain_cfg.get("seed", 1337))
     random.seed(seed)
@@ -1494,6 +2015,14 @@ def run_training(
 
     device, num_gpus = select_device(pretrain_cfg)
     logging.info("Device: %s | GPUs used: %d", device, num_gpus)
+
+    hf_cfg = get_hf_settings(pretrain_cfg, disable=no_hf)
+    if require_hf and hf_cfg is None:
+        raise SystemExit(
+            "HF sync was required (--require-hf), but it is not configured. "
+            "Set HF_TOKEN and hf.repo_id, then run --check-hf. No training "
+            "was started."
+        )
 
     model = GPT(model_cfg)
     n_params = count_parameters(model)
@@ -1509,8 +2038,6 @@ def run_training(
         betas=tuple(pretrain_cfg.get("betas", [0.9, 0.95])),
         weight_decay=float(pretrain_cfg.get("weight_decay", 0.1)),
     )
-
-    hf_cfg = get_hf_settings(pretrain_cfg, disable=no_hf)
 
     data_cfg = pretrain_cfg.get("data") or {}
     block_size = data_cfg.get("block_size") or model_cfg["context_length"]
@@ -1532,15 +2059,29 @@ def run_training(
         grad_accum,
         f"{batch_size * block_size * grad_accum:,}",
     )
+    interval_minutes = float(pretrain_cfg.get("checkpoint_interval_minutes", 60))
+    if interval_minutes < 1.0:
+        interval_text = f"{interval_minutes * 60.0:.0f} s"
+    else:
+        interval_text = f"{interval_minutes:.1f} min"
     logging.info(
-        "Checkpoint: every %.1f min to %s",
-        float(pretrain_cfg.get("checkpoint_interval_minutes", 60)),
+        "Checkpoint: every %s to %s",
+        interval_text,
         resolve_path(pretrain_cfg.get("checkpoint_dir", "checkpoints")),
     )
-    logging.info(
-        "HF sync: %s",
-        "enabled" if hf_cfg else "disabled",
-    )
+    if hf_cfg:
+        logging.info(
+            "HF sync: ENABLED | repo=%s | model=%s | out=%s | token_env=%s",
+            hf_cfg["repo_id"],
+            hf_cfg["filename"],
+            hf_cfg["out_dir"],
+            hf_cfg["token_env"],
+        )
+    else:
+        logging.warning(
+            "HF sync: DISABLED | nothing will be uploaded to HuggingFace. "
+            "Set HF_TOKEN and hf.repo_id, then test with --check-hf."
+        )
     logging.info(
         "Local metrics/plots: %s",
         resolve_path(pretrain_cfg.get("out_dir", "out")),
@@ -1618,13 +2159,17 @@ def run_training(
         )
         raise
     finally:
-        if previous_sigterm is not None:
-            try:
-                signal.signal(signal.SIGTERM, previous_sigterm)
-            except (ValueError, OSError):
-                pass
-        # Always end with the newest finite checkpoint on HF, unless --no-hf.
-        trainer.final_sync()
+        # Always end with the newest finite checkpoint and out/ files on HF,
+        # unless --no-hf. final_sync() defers SIGINT/SIGTERM, so restore the
+        # SIGTERM handler only after the sync has completed.
+        try:
+            trainer.final_sync()
+        finally:
+            if previous_sigterm is not None:
+                try:
+                    signal.signal(signal.SIGTERM, previous_sigterm)
+                except (ValueError, OSError):
+                    pass
     logging.info("Training finished.")
 
 
@@ -1667,6 +2212,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--num-gpus", type=int, default=None)
     parser.add_argument("--checkpoint-dir", type=str, default=None)
     parser.add_argument(
+        "--checkpoint-seconds",
+        type=float,
+        default=None,
+        help="Testing override: seconds between checkpoint saves/uploads. "
+             "Sets checkpoint_interval_minutes = seconds/60 (e.g. 10 for a "
+             "10-second test). Production default is 60 minutes.",
+    )
+    parser.add_argument(
         "--new",
         action="store_true",
         help="Ignore local and HF checkpoints and start from a random model. "
@@ -1678,16 +2231,56 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Start from a random model (ignore local and HF checkpoints) "
              "and disable all HF download/upload.",
     )
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
+        "--detach",
+        action="store_true",
+        help="Start training in its own background session and return "
+             "immediately. Use this from a notebook: a plain `!python ...` "
+             "run is force-killed by Jupyter 0.2s after Ctrl+C, before the "
+             "final upload can finish.",
+    )
+    mode.add_argument(
+        "--stop",
+        action="store_true",
+        help="Ask a detached training run to stop cleanly (SIGTERM). It "
+             "still saves and uploads the model and out/ files.",
+    )
+    mode.add_argument(
+        "--status",
+        action="store_true",
+        help="Show whether a detached run is active, plus the newest log, "
+             "checkpoint, and metrics timestamps.",
+    )
+    mode.add_argument(
+        "--check-hf",
+        action="store_true",
+        help="Check HF_TOKEN, repo access, and write permission, then exit "
+             "without starting training.",
+    )
+    parser.add_argument(
+        "--require-hf",
+        action="store_true",
+        help="Refuse to start training when HF sync is not configured, "
+             "instead of silently training without uploads.",
+    )
+    parser.add_argument(
+        "--log-file",
+        type=Path,
+        default=None,
+        help="Log path for --detach (default: logs/pretrain-<timestamp>.log).",
+    )
+    parser.add_argument(
+        "--stop-timeout",
+        type=float,
+        default=10.0,
+        help="Seconds --stop waits for the trainer to exit before returning "
+             "(default: 10; the upload may continue in the background).",
+    )
     return parser
 
 
-def main(argv: Optional[list[str]] = None) -> None:
-    setup_logging()
-    args = build_arg_parser().parse_args(argv)
-
-    pretrain_cfg = load_yaml(args.pretrain_config)
-    model_cfg = load_yaml(args.model_config)
-
+def apply_cli_overrides(pretrain_cfg: dict, args: argparse.Namespace) -> None:
     if args.max_steps is not None:
         pretrain_cfg["max_steps"] = args.max_steps
     if args.token_budget is not None:
@@ -1702,6 +2295,30 @@ def main(argv: Optional[list[str]] = None) -> None:
         pretrain_cfg["num_gpus"] = args.num_gpus
     if args.checkpoint_dir is not None:
         pretrain_cfg["checkpoint_dir"] = args.checkpoint_dir
+    if args.checkpoint_seconds is not None:
+        if args.checkpoint_seconds <= 0:
+            raise ValueError("--checkpoint-seconds must be greater than zero")
+        pretrain_cfg["checkpoint_interval_minutes"] = args.checkpoint_seconds / 60.0
+
+
+def main(argv: Optional[list[str]] = None) -> None:
+    setup_logging()
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    args = build_arg_parser().parse_args(raw_argv)
+
+    pretrain_cfg = load_yaml(args.pretrain_config)
+    model_cfg = load_yaml(args.model_config)
+    apply_cli_overrides(pretrain_cfg, args)
+    load_env_file(ROOT_DIR / ".env")
+
+    if args.check_hf:
+        raise SystemExit(check_hf(pretrain_cfg, no_hf=args.no_hf))
+    if args.status:
+        raise SystemExit(show_status(pretrain_cfg))
+    if args.stop:
+        raise SystemExit(stop_training(pretrain_cfg, timeout=args.stop_timeout))
+    if args.detach:
+        raise SystemExit(start_detached_training(args, raw_argv, pretrain_cfg))
 
     try:
         run_training(
@@ -1709,6 +2326,7 @@ def main(argv: Optional[list[str]] = None) -> None:
             model_cfg,
             no_hf=args.no_hf,
             new_run=args.new,
+            require_hf=args.require_hf,
         )
     except KeyboardInterrupt:
         logging.info("Training interrupted by user.")

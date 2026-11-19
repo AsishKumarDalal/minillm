@@ -17,9 +17,19 @@ python -m pretrain.train
 python -m pretrain.train --hours 12
 # or stop after 15M tokens; the bar counts toward that budget:
 python -m pretrain.train --budget 15000000
+
+# In a notebook, start in the background so Ctrl+C cannot kill the upload:
+python -m pretrain.train --check-hf
+python -m pretrain.train --detach --new
+python -m pretrain.train --status
+python -m pretrain.train --stop
 ```
 
 In Kaggle, follow the detailed [pretraining runbook](runbook/pretrain.md).
+For notebook runs, always use `--detach`: Jupyter force-kills a plain
+`!python -m pretrain.train` child 0.2 seconds after Ctrl+C, before the final
+save/upload can finish. `--stop` sends SIGTERM to the detached trainer, which
+saves locally and uploads the model and `out/` files before exiting.
 
 ## Layout
 
@@ -44,7 +54,13 @@ In Kaggle, follow the detailed [pretraining runbook](runbook/pretrain.md).
 
 With HF sync enabled, the checkpoint is uploaded to the repo root as
 `minillm_latest.pt` and the `out/` files are uploaded to the repo's `out/`
-folder.
+folder. The small `out/` files go first, and the two uploads are tracked and
+retried independently: if the model upload is interrupted, the plots/metrics
+still land, and `final_sync()` retries only the missing half. Transient Hub
+errors are retried (`hf.upload_retries`, default 3). Repeated Ctrl+C/SIGTERM
+during the final save/upload is deferred until both artifacts finish. Run
+long notebook jobs with `--detach`; logs go to `logs/` and the PID file is
+`checkpoints/train.pid`.
 
 ## Tests
 

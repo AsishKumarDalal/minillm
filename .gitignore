@@ -13,6 +13,7 @@ __pycache__/
 # Training artifacts
 checkpoints/
 out/
+logs/
 smoke_ckpt/
 *.pt
 *.pth

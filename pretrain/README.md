@@ -73,6 +73,34 @@ work.
 
 ## Run
 
+### Notebook-safe start/stop
+
+Do **not** run a long job with `!python -m pretrain.train` in a notebook.
+Jupyter sends Ctrl+C to the child and then force-kills it about 0.2 seconds
+later. SIGKILL cannot be caught, so the final checkpoint save and upload never
+run. Start the trainer in its own session instead:
+
+```python
+# Verify the token, repo, and write access first (no training).
+!python -m pretrain.train --check-hf
+
+# Start in the background. This returns immediately.
+!python -m pretrain.train --detach --new --require-hf
+
+# Inspect progress, newest log, checkpoint, and metrics.
+!python -m pretrain.train --status
+
+# Stop cleanly. SIGTERM triggers the final save + model/out upload.
+!python -m pretrain.train --stop
+```
+
+The detached trainer writes `logs/pretrain-<timestamp>.log`, keeps its PID in
+`checkpoints/train.pid`, and is not in the notebook's process group. A notebook
+Ctrl+C therefore cannot kill it. `--require-hf` makes the run refuse to start
+if `HF_TOKEN` or `hf.repo_id` is missing, instead of silently training without
+uploads. A plain terminal run (outside a notebook) can still use the commands
+below directly.
+
 Auto-select hardware (2 GPUs, else 1 GPU, else CPU):
 
 ```bash
@@ -83,6 +111,13 @@ Force CPU and a short run:
 
 ```bash
 .venv/bin/python -m pretrain.train --device cpu --max-steps 10
+```
+
+Test the checkpoint/upload timer without waiting an hour. This saves and
+uploads (when HF is configured) every 10 seconds instead of every 60 minutes:
+
+```bash
+.venv/bin/python -m pretrain.train --checkpoint-seconds 10 --device cpu
 ```
 
 Stop after 6 or 12 hours of wall-clock training. The final checkpoint and
@@ -216,6 +251,10 @@ from pretrain.train import main
 main(["--device", "cuda", "--max-steps", "100"])
 ```
 
+This in-process form is fine for a short smoke test, but use `--detach` for a
+long run: a notebook Interrupt can terminate kernel code before the final
+upload finishes.
+
 ## Checkpoints and resume
 
 Every `checkpoint_interval_minutes` (default **60**), plus at normal exit,
@@ -235,6 +274,12 @@ files are uploaded to HF on every one of these exit paths. It:
    the previous file.
 4. Uploads the local `out/` folder to `hf.out_dir` (default `out/`) in the
    same repo, replacing the previous plots and metrics.
+   The `out/` files are uploaded first and the model/`out/` results are
+   tracked independently, so a failed or aborted model upload never skips
+   the metrics and plots (and vice versa). Transient errors are retried
+   (`hf.upload_retries`, default 3), and checkpoint/metrics/plot files are
+   written atomically. Repeated Ctrl+C/SIGTERM during the final save/upload
+   is deferred until both artifacts finish.
 5. Optionally includes optimizer state (`save_optimizer: true`) so training
    resumes with Adam moments as well as weights. A 100M-parameter FP32
    optimizer checkpoint is large; set `save_optimizer: false` for smaller

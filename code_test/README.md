@@ -56,6 +56,12 @@ This checks:
 - rejection of NaN checkpoints and refusal to save NaN weights
 - wall-clock time limit and token budget stop training and save/upload the final checkpoint
 - final sync re-uploads the newest finite checkpoint on interrupt/crash paths
+- `out/` and model uploads are tracked/retried independently
+- repeated Ctrl+C/SIGTERM during the final upload is deferred until both uploads finish
+- atomic checkpoint writes and stale `.tmp` cleanup
+- transient HF upload errors retried without retrying auth failures
+- detached `--stop` sends SIGTERM and cleans stale PID files
+- periodic checkpoint/model/`out/` uploads fire at the configured interval
 - metrics history restore and loss/perplexity decreasing as tokens increase
 - local `out/metrics.json` plus loss, perplexity, and combined plots
 - `.env` parsing

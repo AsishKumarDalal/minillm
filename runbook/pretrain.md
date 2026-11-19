@@ -73,6 +73,17 @@ The script reads `HF_TOKEN` from the environment. It also supports a local
 If the token is missing, training still runs; only HF upload/resume is
 disabled with a warning.
 
+Verify the token, repo, and write permission before starting a long run:
+
+```python
+!python -m pretrain.train --check-hf
+```
+
+A correct setup prints `Write access: OK` and
+`Result: HF upload is configured.` If it says `HF_TOKEN is NOT set`, run the
+Secrets cell above again in the same kernel; detached children inherit the
+kernel environment.
+
 ---
 
 ## 5. Verify hardware
@@ -113,55 +124,95 @@ checkpoint:
 
 ## 7. Start the real training
 
-Default config (`configs/pretrain.yaml` + `configs/model.yaml`):
+### Notebook-safe start and stop (recommended)
+
+Do **not** start a long run with `!python -m pretrain.train`: Jupyter sends
+Ctrl+C to the child and then force-kills it about 0.2 seconds later. SIGKILL
+cannot be caught, so the final checkpoint save and upload never run.
+`main([])` runs inside the kernel and blocks the notebook; a detached run is
+safer and lets you keep using the notebook. Start the trainer in its own
+background session instead:
 
 ```python
-from pretrain.train import main
+# 1) Verify HF_TOKEN, repo access, and write permission. No training starts.
+!python -m pretrain.train --check-hf
 
-main([])
+# 2) Start in the background. This cell returns immediately.
+!python -m pretrain.train --detach --new --require-hf
+
+# 3) Inspect progress, newest log, checkpoint, and metrics.
+!python -m pretrain.train --status
+
+# 4) Stop cleanly. SIGTERM triggers the final save and both uploads.
+!python -m pretrain.train --stop
 ```
+
+`--detach` starts a separate session, writes
+`logs/pretrain-<timestamp>.log`, and stores its PID in
+`checkpoints/train.pid`. If you started with a custom `--checkpoint-dir`,
+pass the same flag to `--status` and `--stop` so they find `train.pid`. It is
+safe to close the notebook cell; a notebook Ctrl+C cannot kill the trainer. `--stop` sends SIGTERM, then the trainer
+finishes the current step, writes `checkpoints/minillm_latest.pt`, and
+uploads the model and all `out/` files. If `--stop` says it is still running,
+that is normal for a 1.2 GB upload; the detached process keeps going and
+finishes on its own. Watch the log for:
+
+```text
+Final sync at step ...: local checkpoint saved, model uploaded, out/ uploaded.
+```
+
+`--require-hf` refuses to start when `HF_TOKEN` or `hf.repo_id` is missing,
+so a misconfigured run cannot quietly train without uploading. Omit it only
+when you deliberately want a local-only run.
+
+### Common options
 
 Start from a random model even if a checkpoint exists, but keep saving and
 uploading to HF:
 
 ```python
-main(["--new"])
+!python -m pretrain.train --detach --new
 ```
 
 Start from a random model with no HuggingFace access at all:
 
 ```python
-main(["--no-hf"])
-```
-
-Or from a shell cell:
-
-```python
-!python -m pretrain.train
+!python -m pretrain.train --detach --no-hf
 ```
 
 One GPU instead of two:
 
 ```python
-main(["--device", "cuda", "--num-gpus", "1"])
+!python -m pretrain.train --detach --device cuda --num-gpus 1
 ```
 
 Force CPU:
 
 ```python
-main(["--device", "cpu"])
+!python -m pretrain.train --detach --device cpu
 ```
+
+Test the hourly upload timer in 10 seconds instead of 60 minutes (with HF
+configured, it really uploads the checkpoint and `out/` every 10 seconds):
+
+```python
+!python -m pretrain.train --detach --checkpoint-seconds 10 --device cpu
+```
+
+Watch `logs/pretrain-*.log` for repeated `Saved checkpoint ...` and
+`Uploaded ...` lines about 10 seconds apart. Remove `--checkpoint-seconds`
+for the real run so the interval goes back to 60 minutes.
 
 Short run with HF sync enabled:
 
 ```python
-main(["--device", "cuda", "--max-steps", "100", "--batch-size", "8"])
+!python -m pretrain.train --detach --device cuda --max-steps 100 --batch-size 8
 ```
 
 Stop after 6 hours, then save/upload:
 
 ```python
-main(["--hours", "6"])
+!python -m pretrain.train --detach --hours 6
 ```
 
 `--hours` is an alias for `--max-hours`. You can also set this in
@@ -178,7 +229,7 @@ Stop after a fixed number of tokens instead; the bar counts toward that
 budget (e.g. 15M tokens):
 
 ```python
-main(["--budget", "15000000"])
+!python -m pretrain.train --detach --budget 15000000
 ```
 
 ```yaml
@@ -193,15 +244,24 @@ HF dataset metadata (39,769,491,688 text bytes, 8,013,769 documents) and a
 500-document sample tokenized with `tiktoken`'s `gpt2` encoder (4.4325
 bytes/token). It is only a progress denominator; it does not stop training.
 
+For a 2-step smoke test, `main([...])` in-process is fine; use `--detach` for
+anything long enough to matter.
+
+```python
+from pretrain.train import main
+
+main(["--device", "cpu", "--max-steps", "2", "--no-hf"])
+```
+
 ### What you should see
 
 ```text
 Device: cuda:0 | GPUs used: 2
 Model parameters: 102,467,328
 batch_size=8 block_size=128 grad_accum=1 -> 1,024 tokens per optimizer step
-Checkpoint: every 60.0 min to /kaggle/working/minilllm/checkpoints
-HF sync: enabled
-Local metrics/plots: /kaggle/working/minilllm/out
+Checkpoint: every 60.0 min to /kaggle/working/minillm/checkpoints
+HF sync: ENABLED | repo=sddfhy546y/minillm | model=minillm_latest.pt | out=out | token_env=HF_TOKEN
+Local metrics/plots: /kaggle/working/minillm/out
 HF metrics/plots: sddfhy546y/minillm/out
 Logging: step lines for the first 10 steps only; metrics/plot points every 100 steps; sample generation every 1000 steps.
 step 1 | tokens_seen 1,024 | loss 10.9xxx | ppl 48,xxx | lr 1.50e-06 | tok/s ...
@@ -281,11 +341,24 @@ out/training_curves.png
 ```
 
 Checkpoints and plots are written/uploaded every 60 minutes, at normal exit,
-on a notebook Interrupt, on SIGTERM, when the `max_hours` time limit or
-`--budget` token limit is reached, and on any caught crash. Unless `--no-hf`
-is passed, the final sync uploads the newest finite checkpoint and `out/`
-files on every one of these paths. If your Kaggle session often dies before
-one hour, change `checkpoint_interval_minutes` to 10.
+when you run `--stop` from a notebook, on Ctrl+C/SIGTERM in a terminal, when
+the `max_hours` time limit or `--budget` token limit is reached, and on any
+caught crash. Unless `--no-hf` is passed, the final sync uploads the newest
+finite checkpoint and `out/` files on every one of these paths. Use
+`--detach` in a notebook: Jupyter force-kills a plain `!python` child 0.2s
+after Ctrl+C, so that child cannot finish its upload.
+
+The `out/` files are uploaded first because they are small. The model and
+`out/` uploads are tracked separately and retried independently, so a failed
+model upload never marks the plots as uploaded (or the reverse). Transient
+Hub/network errors are retried three times by default
+(`hf.upload_retries` / `hf.upload_retry_backoff`). If you press Ctrl+C again
+while the final 1.2 GB upload is running, the signal is deferred until both
+the model and `out/` files finish; the same applies to SIGTERM. Checkpoint,
+metrics, and plots are written atomically, and stale `.tmp` files from an
+interrupted save are removed automatically on the next save. If your Kaggle
+session often dies before one hour, change `checkpoint_interval_minutes` to
+10.
 
 ---
 
@@ -368,7 +441,8 @@ Leave `vocab_size: 50257` and `tie_weights: true`.
 
 | Key | Current | Meaning / simple change |
 | --- | --- | --- |
-| `checkpoint_interval_minutes` | `60` | Save/upload interval. Set `10` on short Kaggle sessions. |
+| `checkpoint_interval_minutes` | `60` | Save/upload interval in minutes. Set `10` on short Kaggle sessions. |
+| CLI: `--checkpoint-seconds` | unset | Testing override in seconds, e.g. `10`. Sets `checkpoint_interval_minutes = seconds/60`. Do not use for long runs. |
 | `checkpoint_dir` | `checkpoints` | Local checkpoint folder. |
 | `out_dir` | `out` | Local metrics/plots folder. Same name is used in HF by default. |
 | `save_optimizer` | `true` | Exact resume. Set `false` for much smaller checkpoints if a fresh optimizer is acceptable. |
@@ -393,6 +467,8 @@ Leave `vocab_size: 50257` and `tie_weights: true`.
 | `hf.filename` | `minillm_latest.pt` | Checkpoint filename in the repo root. |
 | `hf.out_dir` | `out` | Folder inside the HF repo for metrics/plots. |
 | `hf.private` | `true` | Used when the script creates a repo. Existing repo visibility is unchanged. |
+| `hf.upload_retries` | `3` | Retries per upload on a transient Hub/network error. Auth/not-found errors are not retried. |
+| `hf.upload_retry_backoff` | `2.0` | Seconds before the first retry; the delay doubles each attempt. |
 
 To disable HF entirely for a run, pass `--no-hf` rather than editing the file.
 `--no-hf` also ignores local and HF checkpoints, so the run always starts
@@ -405,6 +481,9 @@ still want the checkpoint and plots uploaded to HF.
 
 | Goal | Change |
 | --- | --- |
+| Notebook-safe long run | `!python -m pretrain.train --detach --new --require-hf` |
+| Stop now and upload | `!python -m pretrain.train --stop` |
+| Check upload configuration | `!python -m pretrain.train --check-hf` |
 | Fast smoke run | `max_steps: 20`, `batch_size: 2`, `data.max_docs: 5` |
 | Stop after 6 hours | `max_hours: 6` or CLI `main(["--hours", "6"])` |
 | Stop after 12 hours | `max_hours: 12` or CLI `main(["--hours", "12"])` |
@@ -473,7 +552,10 @@ is unchanged.
 | Checkpoint config mismatch | You changed `configs/model.yaml`; start fresh or restore the old architecture. |
 | First batch is slow | Normal; OpenWebText streaming fetches a shard. |
 | `IterableDataset.shuffle() got an unexpected keyword 'max_buffer_input_shards'` | Pull the latest code; the data loader now falls back for older `datasets` versions used by Kaggle. |
-| Only local files, no HF files | Token missing/invalid, or `--no-hf` was used. |
+| Only local files, no HF files | Run `!python -m pretrain.train --check-hf`; fix a missing/invalid token or repo permission. Also check `--no-hf` was not used. |
+| Pressed Ctrl+C, but the model never appeared on HF | Jupyter force-kills a plain `!python` child 0.2s after Ctrl+C. Use `!python -m pretrain.train --detach ...`, then `!python -m pretrain.train --stop`; the trainer runs in its own session and finishes the upload. |
+| `--check-hf` says `HF_TOKEN is NOT set` | Run the Kaggle Secrets cell in the same kernel before starting. A detached child inherits the kernel environment. |
+| `--stop` says training is still running | Normal while the 1.2 GB checkpoint uploads. The process is detached; watch `logs/pretrain-*.log` for the `Final sync ...` line. |
 
 ---
 

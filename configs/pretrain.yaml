@@ -63,3 +63,5 @@ hf:
   filename: minillm_latest.pt
   out_dir: out         # plots/metrics path inside the HF repo
   private: true
+  upload_retries: 3    # retries per upload on transient Hub/network errors
+  upload_retry_backoff: 2.0  # seconds before the first retry, then doubled

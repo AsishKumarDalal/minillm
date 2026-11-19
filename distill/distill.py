@@ -161,7 +161,10 @@ def load_teacher(
         raise SystemExit(
             f"Teacher vocab ({teacher_vocab}) does not match student vocab "
             f"({student_vocab}). Logit distillation needs identical token "
-            f"ids. Change teacher.name or configs/model.yaml."
+            "ids, so use a GPT-2-family model (gpt2, gpt2-medium, gpt2-large, "
+            "gpt2-xl) or another checkpoint with the GPT-2 tokenizer. "
+            "Qwen/Llama/Mistral-style models are not compatible with this "
+            "script. Change teacher.name or configs/model.yaml."
         )
 
     teacher_context = int(

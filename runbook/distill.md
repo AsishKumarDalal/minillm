@@ -13,6 +13,41 @@ loss = (1 - alpha) * cross_entropy(student, labels)
 
 Both models use GPT-2 token ids, so their logits line up directly.
 
+## Teacher compatibility — use GPT-2 models only
+
+This script does **logit** distillation: it compares the teacher's probability
+distribution with the student's at the same token position. That requires both
+models to use the exact same tokenizer and vocabulary. Our student uses GPT-2
+BPE (50,257 ids), so the teacher must too.
+
+**Do not use Qwen, Llama, Mistral, Gemma, Phi, etc.** They have different
+tokenizers and vocabulary sizes (32k–150k+ ids). Their logits are over
+different tokens, so the KL loss would be meaningless and the script will
+stop with a vocab-mismatch error. Supporting them would need a different
+text/sequence-level distillation pipeline or a replaced student tokenizer and
+output head.
+
+Suitable teachers (all GPT-2 tokenizer, 50,257 ids):
+
+| Model | Params | Approx weights fp32 / fp16 | Use |
+| --- | --- | --- | --- |
+| `sshleifer/tiny-gpt2` | ~0.1M | a few MB | Tests only |
+| `gpt2` | 124M | ~0.5 GB / ~0.25 GB | Fast, low VRAM, smallest useful teacher |
+| `gpt2-medium` | 355M | ~1.4 GB / ~0.7 GB | Best speed/quality balance |
+| `gpt2-large` | 774M | ~3.1 GB / ~1.5 GB | Stronger, needs ~6–8 GB GPU |
+| `openai-community/gpt2-xl` (default) | 1.5B | ~6 GB / ~3 GB | Best GPT-2 teacher; fine on T4 |
+
+The student is 102.5M parameters, so a teacher that is several times larger
+gives a useful signal. Tiny teachers are only for smoke tests.
+
+Change the teacher with:
+
+```python
+!python -m distill.distill --teacher gpt2-medium --detach
+```
+
+If GPU memory is tight, set `teacher.device: cpu` in `configs/distill.yaml`.
+
 ---
 
 ## 1. Setup

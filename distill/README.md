@@ -29,6 +29,51 @@ Both models must use the **same vocabulary**. The default teacher
 `openai-community/gpt2-xl` and our student both use GPT-2 BPE (50,257 ids),
 so their logits line up token-for-token. The script checks this at startup.
 
+## Which teachers work (and why not Qwen / Llama / Mistral)
+
+This is **logit distillation**, not text-generation distillation. We take a
+softmax over the teacher's logits and compare it directly with the student's
+softmax at the same position. That only makes sense when token id `12345`
+means the same string in both models.
+
+Our student uses the GPT-2 BPE tokenizer (`tiktoken` `gpt2`, 50,257 ids).
+Therefore the teacher must also use GPT-2 BPE with 50,257 ids. That means the
+**GPT-2 family** (or another checkpoint explicitly trained with the GPT-2
+tokenizer). Models such as Qwen, Llama, Mistral, Gemma, Phi, etc. use totally
+different tokenizers and vocabulary sizes (32k–150k+ ids). Their token ids do
+not correspond to ours, so:
+
+- their logit vector has the wrong width, and
+- even if you padded/truncated it, the probabilities would be over different
+  tokens and the KL loss would be meaningless.
+
+The script refuses to start in that case with a vocab-mismatch error. To use
+such a model you would need a different pipeline (sequence/KD-on-text, or
+replacing the student tokenizer and output head), which is not what this
+script does.
+
+Also, the teacher should be **larger than the student** (102.5M params) so its
+soft targets are actually useful. A tiny teacher gives little signal; a huge
+one is slower and uses more memory.
+
+| Teacher model | Params | Approx weights (fp32 / fp16) | When to use |
+| --- | --- | --- | --- |
+| `sshleifer/tiny-gpt2` | ~0.1M (mostly embeddings) | a few MB | Tests only. Real vocab, near-zero teacher quality. |
+| `gpt2` | 124M | ~0.5 GB / ~0.25 GB | Quick runs and low-VRAM GPUs. Smallest useful teacher. |
+| `gpt2-medium` | 355M | ~1.4 GB / ~0.7 GB | Good speed/quality balance. Works on most 8 GB GPUs. |
+| `gpt2-large` | 774M | ~3.1 GB / ~1.5 GB | Stronger teacher; needs ~6–8 GB GPU memory. |
+| `openai-community/gpt2-xl` (default) | 1.5B | ~6 GB / ~3 GB | Best GPT-2 teacher. Fine on a T4; can set `teacher.device: cpu` if needed. |
+
+Change it in `configs/distill.yaml` or on the command line:
+
+```bash
+python -m distill.distill --teacher gpt2-medium
+python -m distill.distill --teacher gpt2 --device cpu --max-steps 20
+```
+
+`teacher.dtype: auto` uses `bf16`/`fp16` on CUDA and `fp32` on CPU. Set
+`teacher.device: cpu` to offload the teacher if GPU memory is tight.
+
 ## Setup
 
 Teacher inference needs `transformers`:

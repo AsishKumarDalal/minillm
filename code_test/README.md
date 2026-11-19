@@ -93,6 +93,21 @@ also checks all plots and `metrics.json`:
 .venv/bin/python code_test/test_train_curves_real.py
 ```
 
+Run the tiny distillation tests (CPU, local 64-vocab teacher, no network):
+
+```bash
+.venv/bin/python code_test/test_distill_tiny.py
+```
+
+This checks CE/KL weighting with `alpha`, temperature scaling, a full
+distillation step loop, and `distilled_model.pt` / `distilled_outs/metrics.json`
+save/load. A smoke test with a small real HuggingFace teacher (two steps on
+local text, no uploads) is also available:
+
+```bash
+.venv/bin/python code_test/smoke_distill_real_teacher.py
+```
+
 Run the KV-cache correctness tests (no network):
 
 ```bash

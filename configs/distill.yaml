@@ -1,0 +1,75 @@
+# Logit distillation configuration.
+#
+# Student  = our GPT from configs/model.yaml, loaded from the HF checkpoint
+#            sddfhy546y/minillm (or a local copy).
+# Teacher  = a pretrained causal LM from HuggingFace (default GPT-2 XL).
+# Loss     = (1 - alpha) * cross_entropy(student, labels)
+#            + alpha * KL(teacher || student) on logits.
+#
+# Both models must use the same tokenizer/vocabulary (GPT-2 BPE, 50257 ids).
+
+seed: 1337
+device: auto          # auto | cpu | cuda | cuda:0
+num_gpus: 1           # student uses one GPU; teacher may use teacher.device
+
+teacher:
+  name: openai-community/gpt2-xl   # change to any GPT-2-family HF model
+  device: null          # null = same device as student; "cpu" offloads teacher
+  dtype: auto           # auto | bf16 | fp16 | fp32
+  context_length: null  # null = teacher model default; only used for a check
+
+student:
+  source: hf            # hf | local
+  repo_id: sddfhy546y/minillm
+  filename: minillm_latest.pt
+  local_path: checkpoints/minillm_latest.pt
+  prefer_local: true    # use local_path when it exists, else download from HF
+  token_env: HF_TOKEN
+
+model_config: configs/model.yaml
+
+alpha: 0.3             # weight of the KL term; try 0.3, 0.4, or 0.6
+temperature: 1.0       # logit softening for KL; 1.0 = plain softmax
+
+amp: true
+amp_dtype: auto        # auto | bf16 | fp16 | fp32
+learning_rate: 1.0e-4
+min_lr: 1.0e-5
+warmup_steps: 100
+weight_decay: 0.01
+betas: [0.9, 0.95]
+grad_clip: 1.0
+
+batch_size: 4
+grad_accum_steps: 1
+max_steps: null
+max_hours: null
+token_budget: null
+
+log_first_steps: 10
+log_interval: 100
+checkpoint_interval_minutes: 60
+checkpoint_dir: distill_checkpoints
+out_dir: distilled_outs         # local metrics/plots folder
+save_optimizer: false  # distilled checkpoints stay small
+progress: true
+
+data:
+  dataset_name: Skylion007/openwebtext
+  split: train
+  block_size: null     # null -> student context_length (128)
+  shuffle_buffer: 1000
+  max_docs: null
+  min_chars: 1
+
+# Uploading is OFF by default so a test run cannot overwrite the student.
+# Set enabled: true to push the distilled model to HF under a NEW filename.
+hf:
+  enabled: false
+  repo_id: sddfhy546y/minillm
+  token_env: HF_TOKEN
+  filename: distilled_model.pt
+  out_dir: distilled_outs
+  private: true
+  upload_retries: 3
+  upload_retry_backoff: 2.0

@@ -23,6 +23,9 @@ python -m pretrain.train --check-hf
 python -m pretrain.train --detach --new
 python -m pretrain.train --status
 python -m pretrain.train --stop
+
+# Distill a HuggingFace teacher into our HF student (see distill/README.md):
+python -m distill.distill --alpha 0.4
 ```
 
 In Kaggle, follow the detailed [pretraining runbook](runbook/pretrain.md).
@@ -39,8 +42,11 @@ saves locally and uploads the model and `out/` files before exiting.
 | `model/model_parts.py` | Attention, MLP, LayerNorm, KV cache |
 | `pretrain/train.py` | Training loop, checkpoints, HF upload/resume, plots |
 | `pretrain/data.py` | Streaming OpenWebText tokenizer and batches |
+| `distill/distill.py` | Logit distillation from a pretrained HF teacher |
+| `distill/README.md` | Distillation config, loss, and usage guide |
 | `configs/model.yaml` | Model architecture (~102.5M parameters) |
 | `configs/pretrain.yaml` | Training, data, checkpoint, and HF settings |
+| `configs/distill.yaml` | Teacher/student, alpha/temperature, distillation settings |
 | `runbook/pretrain.md` | Full Kaggle runbook and config guide |
 | `code_test/` | Tiny CPU tests and smoke tests |
 

@@ -26,6 +26,9 @@ python -m pretrain.train --stop
 
 # Distill a HuggingFace teacher into our HF student (see distill/README.md):
 python -m distill.distill --alpha 0.4
+
+# SFT on streamed Dolly data (see sft/README.md):
+python -m sft.tuning --epochs 1 --steps 1000
 ```
 
 In Kaggle, follow the detailed [pretraining runbook](runbook/pretrain.md).
@@ -44,11 +47,15 @@ saves locally and uploads the model and `out/` files before exiting.
 | `pretrain/data.py` | Streaming OpenWebText tokenizer and batches |
 | `distill/distill.py` | Logit distillation from a pretrained HF teacher |
 | `distill/README.md` | Distillation config, loss, and usage guide |
+| `sft/sft_data.py` | Streamed Dolly SFT data with runtime triage |
+| `sft/tuning.py` | SFT training loop, epochs/steps, checkpoints, plots |
+| `sft/README.md` | SFT config, data triage, and usage guide |
 | `configs/model.yaml` | Model architecture (~102.5M parameters) |
 | `configs/pretrain.yaml` | Training, data, checkpoint, and HF settings |
 | `configs/distill.yaml` | Teacher/student, alpha/temperature, distillation settings |
 | `runbook/pretrain.md` | Full Kaggle pretraining runbook and config guide |
 | `runbook/distill.md` | Kaggle distillation runbook |
+| `runbook/sft.md` | Kaggle SFT runbook |
 | `code_test/` | Tiny CPU tests and smoke tests |
 
 ## Outputs

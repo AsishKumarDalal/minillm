@@ -9,6 +9,7 @@ Run:
 - `.venv/bin/python code_test/test_kv_cache.py`
 - `.venv/bin/python code_test/test_data_pipeline.py`
 - `.venv/bin/python code_test/test_distill_tiny.py`
+- `.venv/bin/python code_test/test_sft_tiny.py`
 - `.venv/bin/python code_test/test_train_curves_real.py`
 
 Never read, print, or commit `.env`; keep `HF_TOKEN` in env/Kaggle Secrets. Update READMEs/runbook when behavior or config changes. Commit and push only after tests pass.

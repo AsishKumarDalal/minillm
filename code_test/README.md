@@ -111,6 +111,21 @@ available:
 .venv/bin/python code_test/smoke_distill_real_teacher.py
 ```
 
+Run the tiny SFT tests (CPU, local Dolly-style examples, no download):
+
+```bash
+.venv/bin/python code_test/test_sft_tiny.py
+```
+
+This checks runtime triage (full / context-dropped / dropped), answer-only
+loss masking, epochs/steps, checkpoint save/resume, the three `sft_outs/`
+plots, and CLI overrides. A real streamed-Dolly smoke test (two steps, tiny
+random student, no upload) is also available:
+
+```bash
+.venv/bin/python code_test/smoke_sft_real_data.py
+```
+
 Run the KV-cache correctness tests (no network):
 
 ```bash

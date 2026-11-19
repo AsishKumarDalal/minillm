@@ -1,0 +1,72 @@
+# Supervised fine-tuning (SFT) configuration.
+#
+# Dataset: databricks/databricks-dolly-15k, STREAMED (never downloaded whole).
+# Runtime triage per example, with GPT-2 block_size = 128 by default:
+#   1. instruction + context + response (+EOT) <= block_size -> keep all
+#   2. else instruction + response (+EOT) <= block_size -> drop context
+#   3. else drop the example
+# Loss is computed only on response tokens (prompt tokens are masked with -100).
+
+seed: 1337
+device: auto
+num_gpus: 2
+
+# Student starts from our HF checkpoint unless --new/--fullnew is passed.
+student:
+  source: hf            # hf | local
+  repo_id: sddfhy546y/minillm
+  filename: minillm_latest.pt
+  local_path: checkpoints/minillm_latest.pt
+  prefer_local: true
+  token_env: HF_TOKEN
+
+model_config: configs/model.yaml
+
+epochs: 1              # --epochs overrides; number of passes over the stream
+steps: null            # --steps overrides; hard cap on optimizer steps
+
+batch_size: 4
+grad_accum_steps: 1
+learning_rate: 2.0e-5
+min_lr: 2.0e-6
+warmup_steps: 50
+weight_decay: 0.01
+betas: [0.9, 0.95]
+grad_clip: 1.0
+amp: true
+amp_dtype: auto
+
+log_first_steps: 10
+log_interval: 100
+sample_interval: 500
+sample_prompt: "Albert Einstein is a"
+sample_max_new_tokens: 60
+sample_temperature: 0.8
+sample_top_k: 50
+
+checkpoint_interval_minutes: 60
+checkpoint_dir: sft_checkpoints
+out_dir: sft_outs
+save_optimizer: false
+progress: true
+
+data:
+  dataset_name: databricks/databricks-dolly-15k
+  split: train
+  block_size: null      # null -> model context_length (128)
+  shuffle_buffer: 100   # 0 disables shuffling (also used for tests)
+  max_docs: null        # null = stream the whole dataset
+  min_chars: 1
+  tokenizer_name: gpt2
+  # Dolly fields: instruction, context, response. "answer" is also accepted.
+
+# Upload is OFF by default. Pass --upload to push sft_model.pt and sft_outs/.
+hf:
+  enabled: false
+  repo_id: sddfhy546y/minillm
+  token_env: HF_TOKEN
+  filename: sft_model.pt
+  out_dir: sft_outs
+  private: true
+  upload_retries: 3
+  upload_retry_backoff: 2.0

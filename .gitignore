@@ -15,6 +15,8 @@ checkpoints/
 out/
 distill_checkpoints/
 distilled_outs/
+sft_checkpoints/
+sft_outs/
 logs/
 smoke_ckpt/
 *.pt

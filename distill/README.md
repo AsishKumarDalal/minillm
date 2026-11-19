@@ -216,6 +216,19 @@ distilled_outs/metrics.json
 `metrics.json` is a list of records with `step`, `tokens_seen`, `loss`, `ce`,
 `kl`, `alpha`, `temperature`, and `timestamp`.
 
+Every `sample_interval` steps (default **1000**), the trainer also generates a
+short continuation of the fixed `sample_prompt` and writes it above the
+progress bar / log:
+
+```text
+sample @ step 1000 | Albert Einstein is a German-born theoretical physicist ...
+```
+
+This is the quickest way to eyeball whether the student is improving. Set
+`sample_interval: 0` in `configs/distill.yaml` to disable it. The relevant
+config keys are `sample_prompt`, `sample_max_new_tokens`,
+`sample_temperature`, and `sample_top_k`.
+
 If `hf.enabled: true`, the same files are uploaded to
 `sddfhy546y/minillm/distilled_model.pt` and
 `sddfhy546y/minillm/distilled_outs/`. The `distilled_outs/` files are uploaded

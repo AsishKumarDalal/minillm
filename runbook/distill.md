@@ -202,6 +202,16 @@ distilled_outs/metrics.json
 `metrics.json` records `step`, `tokens_seen`, `loss`, `ce`, `kl`, `alpha`,
 `temperature`, and `timestamp`.
 
+Every 1000 steps the trainer prints a fixed test prompt and its continuation:
+
+```text
+sample @ step 1000 | Albert Einstein is a ...
+```
+
+This is controlled by `sample_interval`, `sample_prompt`,
+`sample_max_new_tokens`, `sample_temperature`, and `sample_top_k` in
+`configs/distill.yaml`. Set `sample_interval: 0` to turn it off.
+
 ---
 
 ## 8. GPUs

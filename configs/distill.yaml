@@ -56,6 +56,15 @@ token_budget: null
 
 log_first_steps: 10
 log_interval: 100
+
+# Every sample_interval steps, generate a short continuation of sample_prompt
+# so you can see the student improving. Set sample_interval: 0 to disable.
+sample_interval: 1000
+sample_prompt: "Albert Einstein is a"
+sample_max_new_tokens: 60
+sample_temperature: 0.8
+sample_top_k: 50
+
 checkpoint_interval_minutes: 60
 checkpoint_dir: distill_checkpoints
 out_dir: distilled_outs         # local metrics/plots folder

@@ -56,7 +56,7 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from model.model import GPT  # noqa: E402
-from pretrain.data import OpenWebTextTokenStream  # noqa: E402
+from pretrain.data import OpenWebTextTokenStream, get_encoder  # noqa: E402
 from pretrain.train import (  # noqa: E402
     atomic_torch_save,
     atomic_write_text,
@@ -504,6 +504,7 @@ class Distiller:
         self.last_loss: Optional[float] = None
         self.last_ce: Optional[float] = None
         self.last_kl: Optional[float] = None
+        self.last_sample_text: Optional[str] = None
         self.last_saved_step = 0
         self.last_uploaded_step = 0
         self.last_outputs_uploaded_step = 0
@@ -557,6 +558,73 @@ class Distiller:
     def write_outputs(self) -> list[Path]:
         atomic_write_text(self.metrics_path, json.dumps(self.history, indent=2))
         return [self.metrics_path]
+
+    def _log_sample(self, pbar=None) -> Optional[str]:
+        """Generate a short continuation of a fixed prompt for eyeballing."""
+        prompt = str(
+            self.train_cfg.get("sample_prompt", "Albert Einstein is a")
+        ).strip()
+        if not prompt:
+            return None
+
+        model = unwrap_model(self.model)
+        vocab_size = int(self.student_cfg.get("vocab_size", 0))
+        max_new_tokens = max(
+            1, int(self.train_cfg.get("sample_max_new_tokens", 60))
+        )
+        temperature = float(self.train_cfg.get("sample_temperature", 0.8))
+        top_k = self.train_cfg.get("sample_top_k", 50)
+        top_k = None if top_k in (None, 0) else int(top_k)
+
+        try:
+            prompt_ids = get_encoder().encode(prompt)
+        except Exception as exc:
+            logging.warning("Could not tokenize sample prompt: %s", exc)
+            return None
+        if not prompt_ids:
+            return None
+        if max(prompt_ids) >= vocab_size:
+            logging.warning(
+                "Sample prompt %r uses token ids outside vocab_size=%d; "
+                "skipping sample.",
+                prompt,
+                vocab_size,
+            )
+            return None
+
+        idx = torch.tensor([prompt_ids], dtype=torch.long, device=self.device)
+        try:
+            devices = (
+                [self.device.index]
+                if self.device.type == "cuda" and self.device.index is not None
+                else []
+            )
+            with torch.no_grad(), torch.random.fork_rng(devices=devices):
+                out = model.generate(
+                    idx,
+                    max_new_tokens=max_new_tokens,
+                    temperature=temperature,
+                    top_k=top_k,
+                    use_cache=True,
+                )
+            continuation = get_encoder().decode(out[0, len(prompt_ids) :].tolist())
+        except Exception as exc:
+            logging.warning("Sample generation failed at step %d: %s", self.step, exc)
+            return None
+        finally:
+            try:
+                model.clear_cache()
+            except Exception:
+                pass
+
+        text = " ".join((prompt + continuation).split())
+        self.last_sample_text = text
+        message = f"sample @ step {self.step:,} | {text[:400]}"
+        if pbar is not None:
+            pbar.write(message)
+        else:
+            logging.info("%s", message)
+        return text
 
     # -- checkpoint / HF ----------------------------------------------------
     def sync_to_hf(self, *, checkpoint: bool = True, outputs: bool = True) -> None:
@@ -651,6 +719,7 @@ class Distiller:
         grad_accum = max(1, int(cfg.get("grad_accum_steps", 1)))
         log_first_steps = max(0, int(cfg.get("log_first_steps", 10) or 0))
         log_interval = max(1, int(cfg.get("log_interval", 100) or 100))
+        sample_interval = max(0, int(cfg.get("sample_interval", 1000) or 0))
         grad_clip = float(cfg.get("grad_clip", 1.0))
         show_progress = bool(cfg.get("progress", True))
 
@@ -774,6 +843,9 @@ class Distiller:
                         self.last_kl,
                         self.alpha,
                     )
+
+                if sample_interval > 0 and self.step % sample_interval == 0:
+                    self._log_sample(pbar)
 
                 now = time.monotonic()
                 if (

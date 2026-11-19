@@ -115,6 +115,11 @@ def test_distiller_end_to_end(tmpdir: str) -> None:
         "max_steps": 3,
         "log_first_steps": 1,
         "log_interval": 1,
+        "sample_interval": 2,
+        "sample_prompt": "A",
+        "sample_max_new_tokens": 4,
+        "sample_temperature": 0.8,
+        "sample_top_k": 10,
         "checkpoint_interval_minutes": 60,
         "checkpoint_dir": tmpdir,
         "out_dir": str(Path(tmpdir) / "distilled_outs"),
@@ -133,6 +138,8 @@ def test_distiller_end_to_end(tmpdir: str) -> None:
         hf_cfg=None,
     )
     distiller.train(make_batches(3))
+    assert distiller.last_sample_text is not None
+    assert distiller.last_sample_text.startswith("A")
 
     checkpoint = Path(tmpdir) / "distilled_model.pt"
     metrics = Path(tmpdir) / "distilled_outs" / "metrics.json"

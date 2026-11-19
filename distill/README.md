@@ -1,5 +1,7 @@
 # Logit distillation
 
+For a Kaggle step-by-step, see the [distillation runbook](../runbook/distill.md).
+
 Distill a pretrained HuggingFace causal LM (the **teacher**) into our mini GPT
 (the **student**). The student starts from `sddfhy546y/minillm` and is trained
 on the same streaming OpenWebText batches used for pretraining.
@@ -112,7 +114,23 @@ student (`minillm_latest.pt`), pass `--new`:
 !python -m distill.distill --detach --new
 ```
 
-`--new` ignores both the local and HF `distilled_model.pt`.
+`--new` ignores both the local and HF `distilled_model.pt`, but it still loads
+the original student from `minillm_latest.pt`.
+
+To start from **random weights** and ignore every checkpoint (both the old
+distilled model and the original student), pass `--fullnew`:
+
+```python
+!python -m distill.distill --detach --fullnew
+```
+
+| Flag | Starts from |
+| --- | --- |
+| *(none)* | local/HF `distilled_model.pt` if present, else `minillm_latest.pt` |
+| `--new` | original student `minillm_latest.pt` |
+| `--fullnew` | randomly initialized GPT (no checkpoint loaded) |
+
+`--fullnew` takes priority over `--new` if both are passed.
 
 ## Running
 

@@ -27,6 +27,7 @@ from distill.distill import (  # noqa: E402
     distillation_loss,
     load_resume_state,
     load_yaml,
+    prepare_student,
 )
 from model.model import GPT  # noqa: E402
 
@@ -178,6 +179,7 @@ def test_config_and_overrides() -> None:
             "10",
             "--upload",
             "--new",
+            "--fullnew",
         ]
     )
     apply_cli_overrides(cfg, args)
@@ -186,6 +188,7 @@ def test_config_and_overrides() -> None:
     assert abs(cfg["checkpoint_interval_minutes"] - 10.0 / 60.0) < 1e-9
     assert cfg["hf"]["enabled"] is True
     assert args.new is True
+    assert args.fullnew is True
     print("distill config and CLI overrides OK")
 
 
@@ -238,12 +241,33 @@ def test_resume_from_distilled_checkpoint(tmpdir: str) -> None:
     print("distilled checkpoint resume OK")
 
 
+def test_fullnew_random_init(tmpdir: str) -> None:
+    # A deliberately invalid student path/repo proves no checkpoint is read.
+    cfg = {
+        "checkpoint_dir": tmpdir,
+        "student": {
+            "source": "local",
+            "local_path": str(Path(tmpdir) / "does-not-exist.pt"),
+        },
+        "hf": {"repo_id": "invalid/resume", "filename": "distilled_model.pt"},
+    }
+    student, state, source = prepare_student(
+        cfg, STUDENT_CFG, torch.device("cpu"), Path(tmpdir), full_new=True
+    )
+    assert source == "random init"
+    assert state is None
+    assert isinstance(student, GPT)
+    print("fullnew random student OK")
+
+
 def main() -> None:
     test_distillation_loss_weighting()
     with tempfile.TemporaryDirectory() as tmpdir:
         test_distiller_end_to_end(tmpdir)
     with tempfile.TemporaryDirectory() as tmpdir:
         test_resume_from_distilled_checkpoint(tmpdir)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        test_fullnew_random_init(tmpdir)
     test_config_and_overrides()
     print("all tiny distillation tests passed")
 

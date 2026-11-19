@@ -47,7 +47,8 @@ saves locally and uploads the model and `out/` files before exiting.
 | `configs/model.yaml` | Model architecture (~102.5M parameters) |
 | `configs/pretrain.yaml` | Training, data, checkpoint, and HF settings |
 | `configs/distill.yaml` | Teacher/student, alpha/temperature, distillation settings |
-| `runbook/pretrain.md` | Full Kaggle runbook and config guide |
+| `runbook/pretrain.md` | Full Kaggle pretraining runbook and config guide |
+| `runbook/distill.md` | Kaggle distillation runbook |
 | `code_test/` | Tiny CPU tests and smoke tests |
 
 ## Outputs

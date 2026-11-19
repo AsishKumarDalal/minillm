@@ -8,6 +8,9 @@ OpenWebText. Training uses 2 GPUs via `nn.DataParallel` when available,
 otherwise 1 GPU, otherwise CPU. Checkpoints and training plots sync to the
 HuggingFace repo `sddfhy546y/minillm`.
 
+For logit distillation from a pretrained HuggingFace teacher, see the
+[distillation runbook](distill.md).
+
 ---
 
 ## 1. Before you start

@@ -27,10 +27,12 @@ student:
   prefer_local: true    # use local_path when it exists, else download from HF
   token_env: HF_TOKEN
 
-# Resume: with no --new flag, the newest distilled checkpoint is loaded first
+# Resume: with no flag, the newest distilled checkpoint is loaded first
 # (local distill_checkpoints/distilled_model.pt, else the same file on HF),
-# so `--stop` followed by a normal run continues training. Pass --new to
-# ignore it and restart from the original student above.
+# so `--stop` followed by a normal run continues training.
+# CLI flags:
+#   --new     ignore distilled_model.pt; start from minillm_latest.pt
+#   --fullnew ignore BOTH checkpoints; start from a randomly initialized model
 
 model_config: configs/model.yaml
 

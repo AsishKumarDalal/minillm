@@ -265,6 +265,40 @@ def load_student_model(
     return model, path
 
 
+def prepare_student(
+    cfg: dict,
+    student_cfg: dict,
+    device: torch.device,
+    checkpoint_dir: Path,
+    new_run: bool = False,
+    full_new: bool = False,
+) -> tuple[nn.Module, Optional[dict], str]:
+    """Choose the student weights and return ``(model, resume_state, source)``.
+
+    - ``full_new``: random initialization, ignore every checkpoint.
+    - ``new_run``: ignore previous distilled checkpoint, load the original
+      student (``minillm_latest.pt``).
+    - default: resume from local/HF ``distilled_model.pt`` when present,
+      otherwise load the original student.
+    """
+    if full_new:
+        student = GPT(student_cfg).to(device)
+        student.train()
+        logging.info(
+            "Full new run: student randomly initialized; no checkpoint loaded."
+        )
+        return student, None, "random init"
+
+    if not new_run:
+        resumed = load_resume_state(cfg, student_cfg, device, checkpoint_dir)
+        if resumed is not None:
+            student, state = resumed
+            return student, state, "distilled checkpoint"
+
+    student, _ = load_student_model(cfg, student_cfg, device, checkpoint_dir)
+    return student, None, "original student checkpoint"
+
+
 def load_resume_state(
     cfg: dict,
     student_cfg: dict,
@@ -784,7 +818,9 @@ def format_compact(value: float) -> str:
 # ---------------------------------------------------------------------------
 # Run setup
 # ---------------------------------------------------------------------------
-def run_distillation(cfg: dict, new_run: bool = False) -> None:
+def run_distillation(
+    cfg: dict, new_run: bool = False, full_new: bool = False
+) -> None:
     load_env_file(ROOT_DIR / ".env")
     pid_file = os.environ.get("MINILLM_DISTILL_PID_FILE", "").strip()
     if pid_file:
@@ -830,14 +866,10 @@ def run_distillation(cfg: dict, new_run: bool = False) -> None:
     checkpoint_dir = resolve_path(cfg.get("checkpoint_dir", "distill_checkpoints"))
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
-    resume = None if new_run else load_resume_state(
-        cfg, student_cfg, device, checkpoint_dir
+    student, resume_state, student_source = prepare_student(
+        cfg, student_cfg, device, checkpoint_dir, new_run, full_new
     )
-    if resume is None:
-        student, _ = load_student_model(cfg, student_cfg, device, checkpoint_dir)
-        resume_state = None
-    else:
-        student, resume_state = resume
+    logging.info("Student source: %s.", student_source)
 
     if num_gpus > 1:
         student = nn.DataParallel(student, device_ids=list(range(num_gpus)))
@@ -1145,6 +1177,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Ignore any previous distilled_model.pt and start from the "
              "original student checkpoint (minillm_latest.pt).",
     )
+    parser.add_argument(
+        "--fullnew",
+        action="store_true",
+        help="Randomly initialize the student. Ignore both the previous "
+             "distilled_model.pt and the original minillm_latest.pt.",
+    )
     parser.add_argument("--no-hf", action="store_true", help="Disable HF upload")
     parser.add_argument("--upload", action="store_true", help="Enable HF upload")
     mode = parser.add_mutually_exclusive_group()
@@ -1201,7 +1239,7 @@ def distill_main(argv: Optional[list[str]] = None) -> None:
         raise SystemExit(start_detached(args, raw_argv, cfg))
 
     try:
-        run_distillation(cfg, new_run=args.new)
+        run_distillation(cfg, new_run=args.new, full_new=args.fullnew)
     except KeyboardInterrupt:
         logging.info("Distillation interrupted by user.")
 

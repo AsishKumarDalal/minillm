@@ -92,6 +92,7 @@ def iter_openwebtext_documents(
     seed: int = 42,
     max_docs: Optional[int] = None,
     min_chars: int = 1,
+    skip_docs: int = 0,
 ) -> Iterator[str]:
     """Yield raw OpenWebText documents from a streaming HF dataset.
 
@@ -113,6 +114,9 @@ def iter_openwebtext_documents(
         Useful for smoke tests.
     min_chars:
         Skip documents whose stripped text is shorter than this.
+    skip_docs:
+        Drop the first N documents after shuffling.  This lets a caller
+        reserve a deterministic validation slice at the start of the stream.
     """
     # Imported lazily so the module can be used for local tests without
     # paying the datasets/pyarrow import cost.
@@ -122,9 +126,13 @@ def iter_openwebtext_documents(
         raise ValueError("min_chars must be >= 0")
     if max_docs is not None and max_docs <= 0:
         return
+    if skip_docs < 0:
+        raise ValueError("skip_docs must be >= 0")
 
     ds = load_dataset(dataset_name, split=split, streaming=True)
     ds = _shuffle_streaming_dataset(ds, shuffle_buffer, seed)
+    if skip_docs:
+        ds = ds.skip(int(skip_docs))
 
     yielded = 0
     for example in ds:
@@ -223,6 +231,7 @@ class OpenWebTextTokenStream:
         max_docs: Optional[int] = None,
         min_chars: int = 1,
         documents: Optional[Iterable[str]] = None,
+        skip_docs: int = 0,
     ):
         if block_size < 1:
             raise ValueError("block_size must be >= 1")
@@ -238,6 +247,7 @@ class OpenWebTextTokenStream:
         self.seed = seed
         self.max_docs = max_docs
         self.min_chars = min_chars
+        self.skip_docs = int(skip_docs)
         self._provided_documents = documents
 
     def documents(self) -> Iterator[str]:
@@ -253,6 +263,7 @@ class OpenWebTextTokenStream:
             seed=self.seed,
             max_docs=self.max_docs,
             min_chars=self.min_chars,
+            skip_docs=self.skip_docs,
         )
 
     def blocks(self) -> Iterator[tuple[np.ndarray, np.ndarray]]:

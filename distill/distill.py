@@ -501,6 +501,38 @@ def save_distillation_plots(history: list[dict], out_dir: Path) -> list[Path]:
         ("token_seen_vs_ce.png", "Cross-entropy loss", "CE loss", ces),
         ("token_seen_vs_kl.png", "KL divergence to teacher", "KL loss", kls),
     )
+    if any("val_loss" in entry for entry in history):
+        val_points = [
+            (float(entry.get("tokens_seen", 0)), float(entry["val_loss"]))
+            for entry in history
+            if entry.get("val_loss") is not None
+        ]
+        if len(val_points) >= 2:
+            specs = specs + (
+                (
+                    "token_seen_vs_val_loss.png",
+                    "Validation distillation loss",
+                    "Val loss",
+                    [point[1] for point in val_points],
+                    [point[0] for point in val_points],
+                ),
+            )
+    if any("aux" in entry for entry in history):
+        aux_points = [
+            (float(entry.get("tokens_seen", 0)), float(entry["aux"]))
+            for entry in history
+            if entry.get("aux") is not None
+        ]
+        if len(aux_points) >= 2:
+            specs = specs + (
+                (
+                    "token_seen_vs_router_aux.png",
+                    "Router auxiliary loss",
+                    "Aux loss",
+                    [point[1] for point in aux_points],
+                    [point[0] for point in aux_points],
+                ),
+            )
     for filename, title, ylabel, values in specs:
         try:
             path = _plot_series(out_dir, tokens, values, filename, title, ylabel)
@@ -543,7 +575,9 @@ class Distiller:
             train_cfg.get("checkpoint_dir", "distill_checkpoints")
         )
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
-        filename = (hf_cfg or {}).get("filename", "distilled_model.pt")
+        filename = (hf_cfg or train_cfg.get("hf") or {}).get(
+            "filename", "distilled_model.pt"
+        )
         self.checkpoint_path = self.checkpoint_dir / filename
 
         self.out_dir = resolve_path(train_cfg.get("out_dir", "distilled_outs"))
@@ -564,6 +598,7 @@ class Distiller:
         self.last_loss: Optional[float] = None
         self.last_ce: Optional[float] = None
         self.last_kl: Optional[float] = None
+        self.last_aux: Optional[float] = None
         self.last_sample_text: Optional[str] = None
         self.last_saved_step = 0
         self.last_uploaded_step = 0
@@ -574,6 +609,26 @@ class Distiller:
         self.amp_dtype = choose_amp_dtype(device, train_cfg)
         self.use_amp = self.amp_dtype is not None
         self.scaler = make_grad_scaler(device, self.use_amp, self.amp_dtype)
+
+    # -- model/loss hooks ---------------------------------------------------
+    def compute_student(
+        self, x: torch.Tensor
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        """Return student logits and an optional auxiliary loss.
+
+        The dense student returns a tensor; the MoE student returns
+        ``(logits, aux_loss)`` and overrides this method.
+        """
+        out = self.model(x)
+        if isinstance(out, tuple):
+            return out[0], out[1] if len(out) > 1 else None
+        return out, None
+
+    def extra_stats(self) -> str:
+        return ""
+
+    def extra_checkpoint_state(self) -> dict:
+        return {}
 
     def restore_state(self, state: dict) -> None:
         """Continue from a saved distilled checkpoint (step, tokens, history)."""
@@ -738,6 +793,7 @@ class Distiller:
             state["optimizer"] = self.optimizer.state_dict()
         if torch.cuda.is_available():
             state["cuda_rng_state_all"] = torch.cuda.get_rng_state_all()
+        state.update(self.extra_checkpoint_state())
 
         try:
             atomic_torch_save(state, self.checkpoint_path)
@@ -826,6 +882,7 @@ class Distiller:
                 total_sum = 0.0
                 ce_sum = 0.0
                 kl_sum = 0.0
+                aux_sum = 0.0
                 step_tokens = 0
                 data_exhausted = False
 
@@ -848,7 +905,7 @@ class Distiller:
                         student_ctx = contextlib.nullcontext()
 
                     with student_ctx:
-                        student_logits = self.model(x)
+                        student_logits, aux_loss = self.compute_student(x)
                     teacher_logits = _teacher_logits(
                         self.teacher,
                         x,
@@ -863,6 +920,8 @@ class Distiller:
                         self.alpha,
                         self.temperature,
                     )
+                    if aux_loss is not None:
+                        loss = loss + aux_loss.to(loss.dtype)
                     if not bool(torch.isfinite(loss)):
                         raise RuntimeError(
                             f"non-finite distillation loss at step {self.step + 1}"
@@ -872,6 +931,8 @@ class Distiller:
                     total_sum += float(loss.detach())
                     ce_sum += float(ce.detach())
                     kl_sum += float(kl.detach())
+                    if aux_loss is not None:
+                        aux_sum += float(aux_loss.detach())
 
                 if data_exhausted and total_sum == 0.0:
                     break
@@ -888,11 +949,13 @@ class Distiller:
                 self.last_loss = total_sum / max(1, grad_accum)
                 self.last_ce = ce_sum / max(1, grad_accum)
                 self.last_kl = kl_sum / max(1, grad_accum)
+                self.last_aux = aux_sum / max(1, grad_accum)
                 pbar.update(1)
                 pbar.set_postfix_str(
                     f"#{self.step} | loss {self.last_loss:.3f} | "
                     f"ce {self.last_ce:.3f} | kl {self.last_kl:.3f} | "
                     f"{format_compact(self.tokens_seen)} tok"
+                    f"{self.extra_stats()}"
                 )
 
                 if self.step <= log_first_steps or self.step % log_interval == 0:

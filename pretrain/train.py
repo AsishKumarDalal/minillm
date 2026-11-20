@@ -219,9 +219,13 @@ def select_device(cfg: dict) -> tuple[torch.device, int]:
     return torch.device("cuda:0"), n
 
 
-def model_config_mismatches(saved: dict, current: dict) -> list[str]:
+def model_config_mismatches(
+    saved: dict,
+    current: dict,
+    keys: tuple[str, ...] = ARCH_KEYS,
+) -> list[str]:
     mismatches = []
-    for key in ARCH_KEYS:
+    for key in keys:
         old = saved.get(key, True if key == "tie_weights" else None)
         new = current.get(key, True if key == "tie_weights" else None)
         if old != new:
@@ -446,11 +450,17 @@ def get_hf_settings(cfg: dict, disable: bool = False) -> Optional[dict]:
     if not out_dir:
         out_dir = "out"
 
+    filename = str(hf.get("filename", "minillm_latest.pt")).strip().lstrip("/")
+    path_in_repo = str(hf.get("path_in_repo", filename)).strip().lstrip("/")
+    if not path_in_repo:
+        path_in_repo = filename
+
     return {
         "repo_id": repo_id,
         "token": token,
         "token_env": token_env,
-        "filename": str(hf.get("filename", "minillm_latest.pt")),
+        "filename": filename,
+        "path_in_repo": path_in_repo,
         "out_dir": out_dir,
         "private": bool(hf.get("private", True)),
         "upload_retries": max(1, int(hf.get("upload_retries", 3))),
@@ -497,6 +507,8 @@ def _retry_upload(description: str, action, hf: dict) -> bool:
 
 def download_checkpoint(hf: dict, checkpoint_dir: Path) -> Optional[Path]:
     try:
+        import shutil
+
         from huggingface_hub import hf_hub_download
         from huggingface_hub.utils import (
             EntryNotFoundError,
@@ -510,20 +522,30 @@ def download_checkpoint(hf: dict, checkpoint_dir: Path) -> Optional[Path]:
         return None
 
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    local_name = str(hf.get("filename", "minillm_latest.pt")).strip().lstrip("/")
+    remote_name = str(hf.get("path_in_repo", local_name)).strip().lstrip("/")
+    target = checkpoint_dir / local_name
     try:
-        path = hf_hub_download(
-            repo_id=hf["repo_id"],
-            filename=hf["filename"],
-            repo_type="model",
-            token=hf["token"],
-            local_dir=str(checkpoint_dir),
+        path = Path(
+            hf_hub_download(
+                repo_id=hf["repo_id"],
+                filename=remote_name,
+                repo_type="model",
+                token=hf.get("token") or None,
+                local_dir=str(checkpoint_dir / "_hf_downloads"),
+            )
         )
-        logging.info("Found remote checkpoint: %s", path)
-        return Path(path)
+        if path.resolve() != target.resolve():
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if target.exists():
+                target.unlink()
+            shutil.move(str(path), str(target))
+        logging.info("Found remote checkpoint: %s -> %s", remote_name, target)
+        return target
     except EntryNotFoundError:
         logging.info(
             "No %r in HF repo %s; starting from scratch.",
-            hf["filename"],
+            remote_name,
             hf["repo_id"],
         )
     except RepositoryNotFoundError:
@@ -534,7 +556,7 @@ def download_checkpoint(hf: dict, checkpoint_dir: Path) -> Optional[Path]:
     except Exception as exc:
         logging.warning(
             "Could not download %r from %s: %s; starting from scratch.",
-            hf["filename"],
+            remote_name,
             hf["repo_id"],
             exc,
         )
@@ -555,9 +577,10 @@ def upload_checkpoint(path: Path, hf: dict, step: int) -> bool:
         logging.warning("Checkpoint %s does not exist; upload skipped.", path)
         return False
 
-    path_in_repo = str(hf.get("filename", "minillm_latest.pt")).strip().lstrip("/")
+    path_in_repo = str(hf.get("path_in_repo", hf.get("filename", "minillm_latest.pt")))
+    path_in_repo = path_in_repo.strip().lstrip("/")
     if not path_in_repo:
-        logging.warning("hf.filename is empty; checkpoint upload skipped.")
+        logging.warning("hf.path_in_repo is empty; checkpoint upload skipped.")
         return False
 
     size_mb = path.stat().st_size / (1024 * 1024)
@@ -664,9 +687,12 @@ class Trainer:
         self.model_cfg = model_cfg
         self.train_cfg = train_cfg
         self.hf_cfg = hf_cfg
+        self.arch_keys = ARCH_KEYS
 
         checkpoint_dir = resolve_path(train_cfg.get("checkpoint_dir", "checkpoints"))
-        filename = (hf_cfg or {}).get("filename", "minillm_latest.pt")
+        filename = (hf_cfg or train_cfg.get("hf") or {}).get(
+            "filename", "minillm_latest.pt"
+        )
         self.checkpoint_dir = checkpoint_dir
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
         self.checkpoint_path = self.checkpoint_dir / filename
@@ -704,6 +730,24 @@ class Trainer:
         self.amp_dtype = choose_amp_dtype(device, train_cfg)
         self.use_amp = self.amp_dtype is not None
         self.scaler = make_grad_scaler(device, self.use_amp, self.amp_dtype)
+
+    # -- model/loss hooks ---------------------------------------------------
+    def compute_loss(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+        """Default dense next-token loss. MoE trainers override this."""
+        logits = self.model(x)
+        if isinstance(logits, tuple):
+            logits = logits[0]
+        return F.cross_entropy(
+            logits.view(-1, logits.size(-1)), y.reshape(-1)
+        )
+
+    def extra_stats(self) -> str:
+        """Optional text appended to the tqdm postfix and step log."""
+        return ""
+
+    def extra_checkpoint_state(self) -> dict:
+        """Optional fields merged into the checkpoint payload."""
+        return {}
 
     def _remove_stale_checkpoint_temps(self) -> None:
         """Remove temp checkpoints left by an interrupted save."""
@@ -767,7 +811,9 @@ class Trainer:
             logging.warning("Checkpoint %s has no model_config.", path)
             return False
 
-        mismatches = model_config_mismatches(saved_cfg, self.model_cfg)
+        mismatches = model_config_mismatches(
+            saved_cfg, self.model_cfg, self.arch_keys
+        )
         if mismatches:
             logging.warning(
                 "Checkpoint model config does not match configs/model.yaml. "
@@ -1265,6 +1311,7 @@ class Trainer:
             state["scaler"] = self.scaler.state_dict()
         if torch.cuda.is_available():
             state["cuda_rng_state_all"] = torch.cuda.get_rng_state_all()
+        state.update(self.extra_checkpoint_state())
 
         try:
             atomic_torch_save(state, self.checkpoint_path)
@@ -1503,11 +1550,7 @@ class Trainer:
                         autocast_ctx = contextlib.nullcontext()
 
                     with autocast_ctx:
-                        logits = self.model(x)
-                        loss = F.cross_entropy(
-                            logits.view(-1, logits.size(-1)),
-                            y.reshape(-1),
-                        )
+                        loss = self.compute_loss(x, y)
 
                     micro_losses.append(loss.detach())
                     self.scaler.scale(loss / grad_accum).backward()
@@ -1591,6 +1634,7 @@ class Trainer:
                     f"#{self.step:,} | {format_compact(tok_s)} t/s | "
                     f"{format_compact(self.tokens_seen)} tok | "
                     f"ppl {format_compact(ppl)} | loss {loss_value:.3f}"
+                    f"{self.extra_stats()}"
                 )
                 pbar.set_postfix_str(postfix)
                 # Record metrics for the plots every log_interval steps, but

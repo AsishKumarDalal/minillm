@@ -280,6 +280,23 @@ def save_sft_plots(history: list[dict], out_dir: Path) -> list[Path]:
         ("token_seen_vs_perplexity.png", "Perplexity vs. tokens seen", "Perplexity", ppls, tokens, "Tokens seen"),
         ("step_vs_loss.png", "SFT loss vs. step", "Loss", losses, steps, "Step"),
     )
+    if any("val_loss" in entry for entry in history):
+        val_points = [
+            (float(entry.get("tokens_seen", 0)), float(entry["val_loss"]))
+            for entry in history
+            if "val_loss" in entry and entry["val_loss"] is not None
+        ]
+        if len(val_points) >= 2:
+            specs = specs + (
+                (
+                    "token_seen_vs_val_loss.png",
+                    "Validation loss vs. tokens seen",
+                    "Val loss",
+                    [point[1] for point in val_points],
+                    [point[0] for point in val_points],
+                    "Tokens seen",
+                ),
+            )
     for filename, title, ylabel, ys, xs, xlabel in specs:
         try:
             path = _plot_series(out_dir, xs, ys, filename, title, ylabel, xlabel)
@@ -314,7 +331,9 @@ class SFTTrainer:
             train_cfg.get("checkpoint_dir", "sft_checkpoints")
         )
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
-        filename = (hf_cfg or {}).get("filename", "sft_model.pt")
+        filename = (hf_cfg or train_cfg.get("hf") or {}).get(
+            "filename", "sft_model.pt"
+        )
         self.checkpoint_path = self.checkpoint_dir / filename
 
         self.out_dir = resolve_path(train_cfg.get("out_dir", "sft_outs"))
@@ -340,6 +359,24 @@ class SFTTrainer:
         self.amp_dtype = choose_amp_dtype(device, train_cfg)
         self.use_amp = self.amp_dtype is not None
         self.scaler = make_grad_scaler(device, self.use_amp, self.amp_dtype)
+
+    # -- model/loss hooks ---------------------------------------------------
+    def compute_loss(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+        """Default dense SFT loss. MoE SFT overrides this."""
+        logits = self.model(x)
+        if isinstance(logits, tuple):
+            logits = logits[0]
+        return F.cross_entropy(
+            logits.float().view(-1, logits.size(-1)),
+            y.view(-1),
+            ignore_index=-100,
+        )
+
+    def extra_stats(self) -> str:
+        return ""
+
+    def extra_checkpoint_state(self) -> dict:
+        return {}
 
     def restore_state(self, state: dict) -> None:
         self.step = int(state.get("step", 0))
@@ -429,6 +466,7 @@ class SFTTrainer:
             state["optimizer"] = self.optimizer.state_dict()
         if torch.cuda.is_available():
             state["cuda_rng_state_all"] = torch.cuda.get_rng_state_all()
+        state.update(self.extra_checkpoint_state())
         try:
             atomic_torch_save(state, self.checkpoint_path)
         except Exception as exc:
@@ -565,12 +603,7 @@ class SFTTrainer:
                     else:
                         ctx = contextlib.nullcontext()
                     with ctx:
-                        logits = self.model(x)
-                    loss = F.cross_entropy(
-                        logits.float().view(-1, logits.size(-1)),
-                        y.view(-1),
-                        ignore_index=-100,
-                    )
+                        loss = self.compute_loss(x, y)
                     if not bool(torch.isfinite(loss)):
                         raise RuntimeError(f"non-finite SFT loss at step {self.step + 1}")
                     self.scaler.scale(loss / grad_accum).backward()
@@ -598,6 +631,7 @@ class SFTTrainer:
                 pbar.set_postfix_str(
                     f"#{self.step} | loss {mean_loss:.3f} | ppl {ppl:,.1f} | "
                     f"{format_compact(self.tokens_seen)} tok | ep {self.epoch}"
+                    f"{self.extra_stats()}"
                 )
                 if self.step <= log_first_steps or self.step % log_interval == 0:
                     logging.info(

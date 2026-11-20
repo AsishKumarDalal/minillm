@@ -1,0 +1,80 @@
+# MoE pretraining on the same streamed OpenWebText data as configs/pretrain.yaml.
+#
+# Usage:
+#   python -m pretrain.moe_train
+#   python -m pretrain.moe_train --max-steps 2000 --checkpoint-seconds 60
+#   python -m pretrain.moe_train --hours 12
+#   python -m pretrain.moe_train --budget 20000000
+#   python -m pretrain.moe_train --new --no-hf
+#
+# Local artifacts:
+#   moe_checkpoints/moe_model_latest.pt
+#   moe_outs/metrics.json + loss/perplexity/validation plots
+# HF artifacts (when enabled):
+#   moe/moe_model_latest.pt
+#   moe/out/...
+
+seed: 1337
+device: auto
+num_gpus: 2
+amp: true
+amp_dtype: auto
+
+batch_size: 4
+grad_accum_steps: 2
+max_steps: null
+max_hours: null
+token_budget: null
+
+# One full OpenWebText pass (see configs/pretrain.yaml for the derivation).
+estimated_total_tokens: 8972315576
+
+learning_rate: 3.0e-4
+min_lr: 3.0e-5
+warmup_steps: 200
+weight_decay: 0.1
+betas: [0.9, 0.95]
+grad_clip: 1.0
+
+log_first_steps: 10
+log_interval: 100
+
+# Every sample_interval steps, generate a short continuation so you can see
+# whether routing/expert training is helping. 0 disables it.
+sample_interval: 1000
+sample_prompt: "Albert Einstein is a"
+sample_max_new_tokens: 60
+sample_temperature: 0.8
+sample_top_k: 50
+
+checkpoint_interval_minutes: 60
+checkpoint_dir: moe_checkpoints
+out_dir: moe_outs
+save_optimizer: true
+progress: true
+
+# Held-out validation from the same dataset.  A separate stream is opened
+# with shuffle_buffer=0 so the examples are deterministic; the batches are
+# materialised once at startup and reused at every checkpoint.  val_docs: 0
+# disables validation.
+data:
+  dataset_name: Skylion007/openwebtext
+  split: train
+  block_size: null          # null -> model context_length (128)
+  shuffle_buffer: 1000
+  max_docs: null
+  min_chars: 1
+  val_docs: 64
+  val_batches: 8
+  val_batch_size: 4
+
+hf:
+  repo_id: sddfhy546y/minillm
+  token_env: HF_TOKEN
+  enabled: true
+  filename: moe_model_latest.pt
+  path_in_repo: moe/moe_model_latest.pt
+  out_dir: moe/out
+  private: true
+  upload_retries: 3
+  upload_retry_backoff: 2.0

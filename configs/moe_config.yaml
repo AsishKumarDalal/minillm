@@ -12,7 +12,7 @@
 #
 # Approximate counts for this config (printed at every run start):
 #   total   ~= 161M parameters
-#   active  ~=  76M parameters per token (embeddings + attention + 2 experts)
+#   active  ~= 105M parameters per token (embeddings + attention + 4 experts)
 #
 # This is a deliberately small MoE for the same 128-token blocks used by the
 # dense minillm model.  Increase n_layers/num_experts/d_ff for a larger run.
@@ -25,7 +25,7 @@ n_heads: 12
 n_kv_heads: 4          # GQA: 3 query heads share each KV head
 d_ff: 1536
 num_experts: 8
-top_k: 2
+top_k: 4             # 4 of 8 experts active per token (~105M active params)
 drop_rate: 0.1
 
 # Attention / FFN biases.  qkv_bias is off (GPT-2 style); the output

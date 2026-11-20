@@ -1,0 +1,83 @@
+# MoE supervised fine-tuning on the same streamed Dolly data as
+# configs/sft_config.yaml.
+#
+# Usage:
+#   python -m sft.moe_sft
+#   python -m sft.moe_sft --epochs 1 --steps 500
+#   python -m sft.moe_sft --new --fullnew
+#   python -m sft.moe_sft --no-hf
+#
+# Local artifacts:
+#   moe_sft_checkpoints/moe_model_sft.pt
+#   moe_sft_outs/metrics.json + loss/perplexity/validation plots
+# HF artifacts:
+#   moe/moe_model_sft.pt
+#   moe/sft_outs/...
+
+seed: 1337
+device: auto
+num_gpus: 2
+
+# Start from the pretrained MoE checkpoint.  --new skips a previous SFT
+# checkpoint; --fullnew ignores both and starts from a random model.
+student:
+  source: hf
+  repo_id: sddfhy546y/minillm
+  filename: moe/moe_model_latest.pt
+  local_path: moe_checkpoints/moe_model_latest.pt
+  prefer_local: true
+  token_env: HF_TOKEN
+
+model_config: configs/moe_config.yaml
+
+epochs: 1
+steps: null
+
+batch_size: 4
+grad_accum_steps: 1
+learning_rate: 2.0e-5
+min_lr: 2.0e-6
+warmup_steps: 50
+weight_decay: 0.01
+betas: [0.9, 0.95]
+grad_clip: 1.0
+amp: true
+amp_dtype: auto
+
+log_first_steps: 10
+log_interval: 100
+sample_interval: 500
+sample_prompt: "Albert Einstein is a"
+sample_max_new_tokens: 60
+sample_temperature: 0.8
+sample_top_k: 50
+
+checkpoint_interval_minutes: 60
+checkpoint_dir: moe_sft_checkpoints
+out_dir: moe_sft_outs
+save_optimizer: false
+progress: true
+
+data:
+  dataset_name: databricks/databricks-dolly-15k
+  split: train
+  block_size: null          # null -> model context_length (128)
+  shuffle_buffer: 100
+  max_docs: null
+  min_chars: 1
+  tokenizer_name: gpt2
+  # Held-out SFT validation.  val_docs: 0 disables it.
+  val_docs: 64
+  val_batches: 4
+  val_batch_size: 4
+
+hf:
+  enabled: true
+  repo_id: sddfhy546y/minillm
+  token_env: HF_TOKEN
+  filename: moe_model_sft.pt
+  path_in_repo: moe/moe_model_sft.pt
+  out_dir: moe/sft_outs
+  private: true
+  upload_retries: 3
+  upload_retry_backoff: 2.0

@@ -1,0 +1,55 @@
+# configs/moe_config.yaml
+#
+# Mixture-of-Experts GPT architecture.  The vocabulary is GPT-2 BPE (50257)
+# because pretrain.data, sft.sft_data and the distillation teacher all use
+# that tokenizer.  Do not change vocab_size without retokenising the data.
+#
+# Parameter checks (enforced by model.moe_model.validate_moe_config):
+#   emb_dim % n_heads == 0
+#   n_heads % n_kv_heads == 0
+#   head_dim = emb_dim / n_heads must be even when use_rope is true
+#   top_k <= num_experts
+#
+# Approximate counts for this config (printed at every run start):
+#   total   ~= 161M parameters
+#   active  ~=  76M parameters per token (embeddings + attention + 2 experts)
+#
+# This is a deliberately small MoE for the same 128-token blocks used by the
+# dense minillm model.  Increase n_layers/num_experts/d_ff for a larger run.
+
+vocab_size: 50257
+context_length: 128
+emb_dim: 768
+n_layers: 6
+n_heads: 12
+n_kv_heads: 4          # GQA: 3 query heads share each KV head
+d_ff: 1536
+num_experts: 8
+top_k: 2
+drop_rate: 0.1
+
+# Attention / FFN biases.  qkv_bias is off (GPT-2 style); the output
+# projection bias is kept so every expert/attention output can learn an
+# offset.  head_bias is off because the tied embedding already has no bias.
+qkv_bias: false
+out_proj_bias: true
+head_bias: false
+tie_weights: true
+
+# Positional encoding.  RoPE is relative and KV-cache safe.  With RoPE off,
+# the model falls back to learned absolute position embeddings.
+use_rope: true
+rope_theta: 10000.0
+
+# Optional attention regularisers.
+use_attention_sinks: true    # learned per-head softmax sink (no value vector)
+use_alibi_bias: false        # parameter-free ALiBi distance bias
+
+# Sparse routing.  capacity_factor is per-expert and already accounts for
+# top_k; null disables capacity dropping.  Router jitter is training-only.
+aux_loss_coef: 0.01
+router_z_loss_coef: 0.001
+capacity_factor: 1.25
+router_jitter: 0.0
+
+init_std: 0.02

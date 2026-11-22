@@ -1,0 +1,56 @@
+# Tool-calling distillation configuration.
+#
+# A teacher generates tool calls with an OpenAI-compatible API (the local
+# Inkling-2-Mini server on :8080 works).  Calls are converted to the compact
+# CALL/RESULT protocol, validated, written as JSONL, then used for SFT.
+#
+# HF artifacts:
+#   tool_calling/distill_data/     generated traces (uploaded via --upload)
+#   tool_calling/tool_sft_model.pt student checkpoint (from tool_calling_sft.yaml)
+
+seed: 1337
+
+teacher:
+  base_url: http://127.0.0.1:8080/v1
+  model: inkling-2-mini
+  api_key_env: ""                    # optional; empty -> "local"
+  api_key: local
+  max_tokens: 256
+  temperature: 0.7
+
+tools:
+  - name: weather
+    params: [city]
+    description: Get the current temperature for a city
+    stub_result: {temp_c: 20}
+  - name: calc
+    params: [expr]
+    description: Evaluate simple arithmetic
+    stub_result: {result: 0}
+
+prompts:
+  path: data/tool_prompts.jsonl      # one {"user": "..."} or plain string per line
+  list:
+    - "What is the weather in Paris?"
+    - "How hot is it in Tokyo?"
+    - "Compute 17 * 23."
+
+limit: null                          # --limit overrides
+final_answer_mode: template          # template | teacher
+
+data:
+  path: data/tool_traces.jsonl
+
+sft:
+  config: configs/tool_calling_sft.yaml
+
+hf:
+  enabled: true
+  repo_id: sddfhy546y/minillm
+  token_env: HF_TOKEN
+  filename: tool_traces.jsonl
+  path_in_repo: tool_calling/distill_data/tool_traces.jsonl
+  out_dir: tool_calling/distill_data
+  private: true
+  upload_retries: 3
+  upload_retry_backoff: 2.0

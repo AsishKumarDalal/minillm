@@ -1,0 +1,67 @@
+# Tool-calling SFT configuration.
+#
+# Student: previous checkpoint (instruction SFT recommended).
+# Data: compact tool-trace JSONL written by tool_calling/data_format.py or
+#       tool_calling/tool_calling_distill.py.
+#
+# HF artifacts (when enabled) go under tool_calling/ in the repo:
+#   tool_calling/tool_sft_model.pt
+#   tool_calling/sft_outs/...
+
+seed: 1337
+device: auto
+num_gpus: 2
+
+student:
+  source: local                       # local | hf
+  local_path: sft_checkpoints/sft_model.pt
+  repo_id: sddfhy546y/minillm
+  filename: dense/sft_model.pt
+  prefer_local: true
+  token_env: HF_TOKEN
+
+model_config: configs/model.yaml
+
+epochs: 2
+steps: null                          # --steps overrides
+batch_size: 4
+grad_accum_steps: 1
+learning_rate: 2.0e-5
+min_lr: 2.0e-6
+warmup_steps: 50
+weight_decay: 0.01
+betas: [0.9, 0.95]
+grad_clip: 1.0
+amp: true
+amp_dtype: auto
+
+log_first_steps: 10
+log_interval: 100
+sample_interval: 500
+sample_prompt: "TOOLS: weather(city)\nUSER: weather in Paris?\nASSISTANT:"
+sample_max_new_tokens: 48
+sample_temperature: 0.0
+sample_top_k: null
+
+checkpoint_interval_minutes: 60
+checkpoint_dir: tool_calling_checkpoints
+out_dir: tool_calling_sft_outs
+save_optimizer: false
+progress: true
+
+data:
+  path: data/tool_traces.jsonl
+  block_size: null                   # null -> context_length (1024)
+  tokenizer_name: gpt2
+  max_docs: null
+
+hf:
+  enabled: true
+  repo_id: sddfhy546y/minillm
+  token_env: HF_TOKEN
+  filename: tool_sft_model.pt
+  path_in_repo: tool_calling/tool_sft_model.pt
+  out_dir: tool_calling/sft_outs
+  private: true
+  upload_retries: 3
+  upload_retry_backoff: 2.0

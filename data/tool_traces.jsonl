@@ -1,0 +1,4 @@
+{"tools":"weather(city)|calc(expr)","user":"What is the weather in Paris?","call":"CALL weather {\"city\":\"Paris\"}","result":"{\"temp_c\":22}","answer":"It is 22C in Paris.","source":"seed"}
+{"tools":"weather(city)|calc(expr)","user":"How hot is it in Tokyo?","call":"CALL weather {\"city\":\"Tokyo\"}","result":"{\"temp_c\":21}","answer":"It is 21C in Tokyo.","source":"seed"}
+{"tools":"weather(city)|calc(expr)","user":"Compute 17 * 23.","call":"CALL calc {\"expr\":\"17*23\"}","result":"{\"result\":391}","answer":"17 * 23 is 391.","source":"seed"}
+{"tools":"weather(city)|calc(expr)","user":"What is 2+2?","call":null,"result":null,"answer":"4","source":"seed"}

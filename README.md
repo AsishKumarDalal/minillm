@@ -29,6 +29,9 @@ python -m distill.distill --alpha 0.4
 
 # SFT on streamed Dolly data (see sft/README.md):
 python -m sft.tuning --epochs 1 --steps 1000
+
+# Tool-calling SFT on compact tool traces (see experiments/plan/toolcalling.md):
+python -m tool_calling.tool_calling_sft --steps 500 --no-hf
 ```
 
 In Kaggle, follow the detailed [pretraining runbook](runbook/pretrain.md).
@@ -50,6 +53,8 @@ saves locally and uploads the model and `out/` files before exiting.
 | `sft/sft_data.py` | Streamed Dolly SFT data with runtime triage |
 | `sft/tuning.py` | SFT training loop, epochs/steps, checkpoints, plots |
 | `sft/README.md` | SFT config, data triage, and usage guide |
+| `tool_calling/` | Tool-calling SFT, teacher distillation, negative sampling/DPO |
+| `experiments/plan/toolcalling.md` | Full tool-calling pipeline, data format, and commands |
 | `configs/model.yaml` | Model architecture (~102.5M parameters) |
 | `configs/pretrain.yaml` | Training, data, checkpoint, and HF settings |
 | `configs/distill.yaml` | Teacher/student, alpha/temperature, distillation settings |

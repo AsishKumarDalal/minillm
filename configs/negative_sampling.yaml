@@ -1,0 +1,67 @@
+# Negative sampling + DPO for tool calling.
+#
+# Stage 1: sample N candidates per prompt from the tool-SFT model.
+#          valid CALL -> chosen, invalid CALL / plain wrong -> rejected.
+# Stage 2: DPO training against a frozen copy of the same model.
+#
+# HF artifacts:
+#   tool_calling/negative_model.pt
+#   tool_calling/negative_outs/
+
+seed: 1337
+device: auto
+num_gpus: 1
+
+student:
+  source: local
+  local_path: tool_calling_checkpoints/tool_sft_model.pt
+  repo_id: sddfhy546y/minillm
+  filename: tool_calling/tool_sft_model.pt
+  prefer_local: true
+  token_env: HF_TOKEN
+
+model_config: configs/model.yaml
+
+tools:
+  - name: weather
+    params: [city]
+    description: Get the current temperature for a city
+    stub_result: {temp_c: 20}
+  - name: calc
+    params: [expr]
+    description: Evaluate simple arithmetic
+    stub_result: {result: 0}
+
+data:
+  path: data/tool_traces.jsonl
+  preferences_path: data/negative_preferences.jsonl
+  tokenizer_name: gpt2
+
+num_candidates: 8
+max_new_tokens: 48
+temperature: 0.8
+top_k: 50
+limit: null
+
+beta: 0.1
+learning_rate: 5.0e-7
+betas: [0.9, 0.95]
+weight_decay: 0.01
+grad_clip: 1.0
+batch_size: 2
+steps: 100
+log_interval: 10
+
+checkpoint_dir: tool_calling_checkpoints
+out_dir: tool_calling_negative_outs
+
+hf:
+  enabled: true
+  repo_id: sddfhy546y/minillm
+  token_env: HF_TOKEN
+  filename: negative_model.pt
+  path_in_repo: tool_calling/negative_model.pt
+  out_dir: tool_calling/negative_outs
+  private: true
+  upload_retries: 3
+  upload_retry_backoff: 2.0

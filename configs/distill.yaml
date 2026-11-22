@@ -7,6 +7,10 @@
 #            + alpha * KL(teacher || student) on logits.
 #
 # Both models must use the same tokenizer/vocabulary (GPT-2 BPE, 50257 ids).
+#
+# HF artifacts (when enabled), mirroring the MoE layout under moe/:
+#   dense/distilled_model.pt
+#   dense/distill_outs/...
 
 seed: 1337
 device: auto          # auto | cpu | cuda | cuda:0
@@ -22,7 +26,7 @@ teacher:
 student:
   source: hf            # hf | local; used only when there is no distilled checkpoint
   repo_id: sddfhy546y/minillm
-  filename: minillm_latest.pt
+  filename: dense/minillm_latest.pt
   local_path: checkpoints/minillm_latest.pt
   prefer_local: true    # use local_path when it exists, else download from HF
   token_env: HF_TOKEN
@@ -79,14 +83,16 @@ data:
   max_docs: null
   min_chars: 1
 
-# Uploading is OFF by default so a test run cannot overwrite the student.
-# Set enabled: true to push the distilled model to HF under a NEW filename.
+# Uploads the distilled model and metrics/plots to dense/ in the HF repo,
+# like MoE. It never overwrites the dense/minillm_latest.pt student.
+# Pass --no-hf to keep a run local-only.
 hf:
-  enabled: false
+  enabled: true
   repo_id: sddfhy546y/minillm
   token_env: HF_TOKEN
-  filename: distilled_model.pt
-  out_dir: distilled_outs
+  filename: distilled_model.pt              # local checkpoint filename
+  path_in_repo: dense/distilled_model.pt    # checkpoint path inside the HF repo
+  out_dir: dense/distill_outs               # plots/metrics path inside the HF repo
   private: true
   upload_retries: 3
   upload_retry_backoff: 2.0

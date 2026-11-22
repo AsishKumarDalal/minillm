@@ -66,10 +66,11 @@ saves locally and uploads the model and `out/` files before exiting.
 - `out/token_seen_vs_perplexity.png`
 - `out/training_curves.png`
 
-With HF sync enabled, the checkpoint is uploaded to the repo root as
-`minillm_latest.pt` and the `out/` files are uploaded to the repo's `out/`
-folder. The small `out/` files go first, and the two uploads are tracked and
-retried independently: if the model upload is interrupted, the plots/metrics
+With HF sync enabled, the checkpoint is uploaded to `dense/minillm_latest.pt`
+and the `out/` files are uploaded to the repo's `dense/out/` folder, mirroring
+the MoE pipeline's `moe/` layout. The small `out/` files go first, and the two
+uploads are tracked and retried independently: if the model upload is
+interrupted, the plots/metrics
 still land, and `final_sync()` retries only the missing half. Transient Hub
 errors are retried (`hf.upload_retries`, default 3). Repeated Ctrl+C/SIGTERM
 during the final save/upload is deferred until both artifacts finish. Run

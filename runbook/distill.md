@@ -85,7 +85,7 @@ teacher:
 
 student:
   repo_id: sddfhy546y/minillm
-  filename: minillm_latest.pt
+  filename: dense/minillm_latest.pt
 
 model_config: configs/model.yaml
 
@@ -98,12 +98,14 @@ checkpoint_dir: distill_checkpoints
 out_dir: distilled_outs
 
 hf:
-  enabled: false              # uploads OFF by default
+  enabled: true               # --no-hf turns uploads off
   filename: distilled_model.pt
-  out_dir: distilled_outs
+  path_in_repo: dense/distilled_model.pt
+  out_dir: dense/distill_outs
 ```
 
-Set `hf.enabled: true` only when you want the distilled model pushed to HF.
+The distilled model and plots are pushed under `dense/`, mirroring the MoE
+`moe/` layout.
 
 ---
 
@@ -111,8 +113,8 @@ Set `hf.enabled: true` only when you want the distilled model pushed to HF.
 
 | Command | Student weights |
 | --- | --- |
-| `python -m distill.distill` | Resume from local/HF `distilled_model.pt` if it exists; otherwise load `minillm_latest.pt` |
-| `python -m distill.distill --new` | Ignore old distilled checkpoints; load original `minillm_latest.pt` |
+| `python -m distill.distill` | Resume from local/HF `distilled_model.pt` if it exists; otherwise load `dense/minillm_latest.pt` |
+| `python -m distill.distill --new` | Ignore old distilled checkpoints; load original `dense/minillm_latest.pt` |
 | `python -m distill.distill --fullnew` | Random initialization; ignore **all** checkpoints |
 
 `--fullnew` is what you want for a completely fresh distillation run.
@@ -162,7 +164,7 @@ Just run again with no special flag:
 It restores from:
 
 1. local `distill_checkpoints/distilled_model.pt`
-2. otherwise `sddfhy546y/minillm/distilled_model.pt` on HF
+2. otherwise `sddfhy546y/minillm/dense/distilled_model.pt` on HF
 
 Restored state includes model weights, `step`, `tokens_seen`, metrics history,
 and optimizer state when present.
@@ -171,22 +173,20 @@ and optimizer state when present.
 
 ## 6. Uploading
 
-Upload is OFF unless you pass `--upload` or set `hf.enabled: true`.
+Upload is ON by default (`hf.enabled: true`); `--no-hf` forces it off.
 
 ```python
-!python -m distill.distill --detach --upload
+!python -m distill.distill --detach
 ```
 
 This uploads to:
 
 ```text
-sddfhy546y/minillm/distilled_model.pt
-sddfhy546y/minillm/distilled_outs/metrics.json
+sddfhy546y/minillm/dense/distilled_model.pt
+sddfhy546y/minillm/dense/distill_outs/metrics.json
 ```
 
-It does **not** overwrite `minillm_latest.pt` (the student source).
-
-`--no-hf` forces upload OFF even if the YAML says true.
+It does **not** overwrite `dense/minillm_latest.pt` (the student source).
 
 ---
 
@@ -204,8 +204,8 @@ distilled_outs/token_seen_vs_kl.png
 ```
 
 These are the four graphs: total loss, perplexity (from CE), cross-entropy,
-and KL divergence — all against tokens seen. With `--upload`, the whole
-`distilled_outs/` folder is pushed to HF under `distilled_outs/`.
+and KL divergence — all against tokens seen. The whole `distilled_outs/`
+folder is pushed to HF under `dense/distill_outs/`.
 
 `metrics.json` records `step`, `tokens_seen`, `loss`, `ce`, `kl`, `alpha`,
 `temperature`, and `timestamp`.

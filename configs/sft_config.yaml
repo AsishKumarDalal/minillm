@@ -6,6 +6,10 @@
 #   2. else instruction + response (+EOT) <= block_size -> drop context
 #   3. else drop the example
 # Loss is computed only on response tokens (prompt tokens are masked with -100).
+#
+# HF artifacts (when enabled), mirroring the MoE layout under moe/:
+#   dense/sft_model.pt
+#   dense/sft_outs/...
 
 seed: 1337
 device: auto
@@ -15,7 +19,7 @@ num_gpus: 2
 student:
   source: hf            # hf | local
   repo_id: sddfhy546y/minillm
-  filename: minillm_latest.pt
+  filename: dense/minillm_latest.pt
   local_path: checkpoints/minillm_latest.pt
   prefer_local: true
   token_env: HF_TOKEN
@@ -60,13 +64,15 @@ data:
   tokenizer_name: gpt2
   # Dolly fields: instruction, context, response. "answer" is also accepted.
 
-# Upload is OFF by default. Pass --upload to push sft_model.pt and sft_outs/.
+# Uploads the model and metrics/plots to dense/ in the HF repo, like MoE.
+# Pass --no-hf to keep a run local-only.
 hf:
-  enabled: false
+  enabled: true
   repo_id: sddfhy546y/minillm
   token_env: HF_TOKEN
-  filename: sft_model.pt
-  out_dir: sft_outs
+  filename: sft_model.pt              # local checkpoint filename
+  path_in_repo: dense/sft_model.pt    # checkpoint path inside the HF repo
+  out_dir: dense/sft_outs             # plots/metrics path inside the HF repo
   private: true
   upload_retries: 3
   upload_retry_backoff: 2.0

@@ -17,7 +17,8 @@ Features
   bar shows tokens seen / the estimated token count of one OpenWebText pass
   (``estimated_total_tokens`` in the config).
 * Writes ``out/metrics.json`` and token-vs-loss / token-vs-perplexity plots
-  at the same interval, then uploads them to the HF repo's ``out/`` folder.
+  at the same interval, then uploads them to the HF repo's ``dense/out/``
+  folder (the MoE pipeline uses ``moe/out/``).
 * On startup, resumes from ``checkpoints/minillm_latest.pt`` if it exists,
   otherwise downloads ``minillm_latest.pt`` from the configured HF repo.
   It restores model, optimizer, step, tokens, RNG state, and the metrics
@@ -2117,7 +2118,7 @@ def run_training(
         logging.info(
             "HF sync: ENABLED | repo=%s | model=%s | out=%s | token_env=%s",
             hf_cfg["repo_id"],
-            hf_cfg["filename"],
+            hf_cfg["path_in_repo"],
             hf_cfg["out_dir"],
             hf_cfg["token_env"],
         )

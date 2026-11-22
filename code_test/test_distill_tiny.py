@@ -19,6 +19,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from distill import distill as distill_mod  # noqa: E402
 from distill.distill import (  # noqa: E402
     DEFAULT_DISTILL_CONFIG,
     Distiller,
@@ -26,6 +27,7 @@ from distill.distill import (  # noqa: E402
     build_arg_parser,
     distillation_loss,
     load_resume_state,
+    load_student_model,
     load_yaml,
     prepare_student,
 )
@@ -177,8 +179,10 @@ def test_config_and_overrides() -> None:
     cfg = load_yaml(DEFAULT_DISTILL_CONFIG)
     assert cfg["teacher"]["name"] == "openai-community/gpt2-xl"
     assert cfg["student"]["repo_id"] == "sddfhy546y/minillm"
+    assert cfg["student"]["filename"] == "dense/minillm_latest.pt"
     assert cfg["hf"]["filename"] == "distilled_model.pt"
-    assert cfg["hf"]["out_dir"] == "distilled_outs"
+    assert cfg["hf"]["path_in_repo"] == "dense/distilled_model.pt"
+    assert cfg["hf"]["out_dir"] == "dense/distill_outs"
     assert cfg["out_dir"] == "distilled_outs"
     assert int(cfg["num_gpus"]) == 2
     assert 0.0 <= float(cfg["alpha"]) <= 1.0
@@ -275,6 +279,54 @@ def test_fullnew_random_init(tmpdir: str) -> None:
     print("fullnew random student OK")
 
 
+def test_dense_hf_paths(tmpdir: str) -> None:
+    calls = []
+    original = distill_mod.download_checkpoint
+
+    def fake_download(hf, checkpoint_dir):
+        calls.append((dict(hf), Path(checkpoint_dir)))
+        return None
+
+    distill_mod.download_checkpoint = fake_download
+    try:
+        cfg = {
+            "student": {
+                "source": "hf",
+                "repo_id": "sddfhy546y/minillm",
+                "filename": "dense/minillm_latest.pt",
+                "local_path": str(Path(tmpdir) / "checkpoints" / "minillm_latest.pt"),
+                "prefer_local": False,
+            }
+        }
+        try:
+            load_student_model(
+                cfg, STUDENT_CFG, torch.device("cpu"), Path(tmpdir) / "checkpoints"
+            )
+        except SystemExit:
+            pass
+        else:
+            raise AssertionError("missing student download should exit")
+        assert calls[-1][0]["path_in_repo"] == "dense/minillm_latest.pt"
+        assert calls[-1][0]["filename"] == "minillm_latest.pt"
+
+        cfg = {
+            "hf": {
+                "enabled": True,
+                "repo_id": "sddfhy546y/minillm",
+                "filename": "distilled_model.pt",
+                "path_in_repo": "dense/distilled_model.pt",
+            }
+        }
+        load_resume_state(
+            cfg, STUDENT_CFG, torch.device("cpu"), Path(tmpdir) / "distill_checkpoints"
+        )
+        assert calls[-1][0]["path_in_repo"] == "dense/distilled_model.pt"
+        assert calls[-1][0]["filename"] == "distilled_model.pt"
+    finally:
+        distill_mod.download_checkpoint = original
+    print("distill dense/ HF paths OK")
+
+
 def main() -> None:
     test_distillation_loss_weighting()
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -284,6 +336,8 @@ def main() -> None:
     with tempfile.TemporaryDirectory() as tmpdir:
         test_fullnew_random_init(tmpdir)
     test_config_and_overrides()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        test_dense_hf_paths(tmpdir)
     print("all tiny distillation tests passed")
 
 

@@ -6,8 +6,9 @@ keeps ``instruction + context + response`` when it fits in the context window,
 otherwise ``instruction + response``, otherwise drops the example.
 
 Outputs mirror the other training pipelines: ``sft_checkpoints/sft_model.pt``
-and ``sft_outs/`` (metrics + loss/perplexity plots), uploaded every 60 minutes
-and on clean stop when `--upload` is set.
+and ``sft_outs/`` (metrics + loss/perplexity plots) locally, uploaded every
+60 minutes and on clean stop to ``dense/sft_model.pt`` and ``dense/sft_outs/``
+on HF (``--no-hf`` keeps a run local-only).
 
 Usage
 -----
@@ -112,14 +113,20 @@ def load_student_model(
         if bool(section.get("prefer_local", True)) and local_path.exists():
             path = local_path
         else:
-            hf = {
-                "repo_id": str(section.get("repo_id", "")).strip(),
-                "filename": str(section.get("filename", "minillm_latest.pt")).strip(),
-                "token": _token_from_env(token_env),
-            }
-            if not hf["repo_id"]:
+            repo_id = str(section.get("repo_id", "")).strip()
+            if not repo_id:
                 raise SystemExit("student.repo_id is empty in configs/sft_config.yaml")
-            path = download_checkpoint(hf, checkpoint_dir)
+            path = download_checkpoint(
+                {
+                    "repo_id": repo_id,
+                    "filename": local_path.name,
+                    "path_in_repo": str(
+                        section.get("filename", "dense/minillm_latest.pt")
+                    ).strip(),
+                    "token": _token_from_env(token_env),
+                },
+                local_path.parent,
+            )
         if path is None:
             raise SystemExit(
                 "No student checkpoint found. Put it at "
@@ -171,11 +178,14 @@ def load_sft_state(
     ).strip()
 
     path: Optional[Path] = local_path if local_path.exists() else None
-    if path is None and repo_id:
+    if path is None and repo_id and bool(hf.get("enabled", True)):
         path = download_checkpoint(
             {
                 "repo_id": repo_id,
                 "filename": filename,
+                "path_in_repo": str(
+                    hf.get("path_in_repo", f"dense/{filename}")
+                ).strip(),
                 "token": _token_from_env(str(hf.get("token_env", "HF_TOKEN"))),
             },
             checkpoint_dir,

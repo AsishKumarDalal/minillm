@@ -151,11 +151,61 @@ def test_sft_resume_and_cli() -> None:
     print("SFT resume and CLI overrides OK")
 
 
+def test_sft_dense_hf_paths(tmpdir: str) -> None:
+    calls = []
+    original = tuning.download_checkpoint
+
+    def fake_download(hf, checkpoint_dir):
+        calls.append((dict(hf), Path(checkpoint_dir)))
+        return None
+
+    tuning.download_checkpoint = fake_download
+    try:
+        cfg = {
+            "student": {
+                "source": "hf",
+                "repo_id": "sddfhy546y/minillm",
+                "filename": "dense/minillm_latest.pt",
+                "local_path": str(Path(tmpdir) / "checkpoints" / "minillm_latest.pt"),
+                "prefer_local": False,
+            }
+        }
+        try:
+            tuning.load_student_model(
+                cfg, MODEL_CFG, torch.device("cpu"), Path(tmpdir) / "checkpoints"
+            )
+        except SystemExit:
+            pass
+        else:
+            raise AssertionError("missing student download should exit")
+        assert calls[-1][0]["path_in_repo"] == "dense/minillm_latest.pt"
+        assert calls[-1][0]["filename"] == "minillm_latest.pt"
+
+        cfg = {
+            "hf": {
+                "enabled": True,
+                "repo_id": "sddfhy546y/minillm",
+                "filename": "sft_model.pt",
+                "path_in_repo": "dense/sft_model.pt",
+            }
+        }
+        tuning.load_sft_state(
+            cfg, MODEL_CFG, torch.device("cpu"), Path(tmpdir) / "sft_checkpoints"
+        )
+        assert calls[-1][0]["path_in_repo"] == "dense/sft_model.pt"
+        assert calls[-1][0]["filename"] == "sft_model.pt"
+    finally:
+        tuning.download_checkpoint = original
+    print("SFT dense/ HF paths OK")
+
+
 def main() -> None:
     test_sft_data_triage()
     with tempfile.TemporaryDirectory() as tmpdir:
         test_sft_pipeline_end_to_end(tmpdir)
     test_sft_resume_and_cli()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        test_sft_dense_hf_paths(tmpdir)
     print("all tiny SFT tests passed")
 
 

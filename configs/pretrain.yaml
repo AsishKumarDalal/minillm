@@ -1,5 +1,9 @@
 # Pretraining configuration for configs/model.yaml
 #
+# HF artifacts (when enabled), mirroring the MoE layout under moe/:
+#   dense/minillm_latest.pt
+#   dense/out/...
+#
 # Hardware:
 #   device: auto  -> use min(num_gpus, available GPUs), else CPU
 #   device: cpu   -> force CPU
@@ -45,7 +49,7 @@ sample_top_k: 50
 
 checkpoint_interval_minutes: 60
 checkpoint_dir: checkpoints
-out_dir: out            # local metrics + plots; also uploaded to HF under out/
+out_dir: out            # local metrics + plots; uploaded to HF under dense/out/
 save_optimizer: true    # false = smaller checkpoints, optimizer starts fresh
 progress: true          # tqdm.auto bar; % of max_steps, max_hours, or next save
 
@@ -60,8 +64,9 @@ data:
 hf:
   repo_id: "sddfhy546y/minillm"  # e.g. "your-username/minillm"
   token_env: HF_TOKEN  # read from .env or the environment
-  filename: minillm_latest.pt
-  out_dir: out         # plots/metrics path inside the HF repo
+  filename: minillm_latest.pt            # local checkpoint filename
+  path_in_repo: dense/minillm_latest.pt  # checkpoint path inside the HF repo
+  out_dir: dense/out                     # plots/metrics path inside the HF repo
   private: true
   upload_retries: 3    # retries per upload on transient Hub/network errors
   upload_retry_backoff: 2.0  # seconds before the first retry, then doubled

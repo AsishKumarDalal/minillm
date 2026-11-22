@@ -30,9 +30,10 @@ checkpoint_dir: sft_checkpoints
 out_dir: sft_outs
 
 hf:
-  enabled: false     # --upload turns this on
+  enabled: true      # --no-hf turns this off
   filename: sft_model.pt
-  out_dir: sft_outs
+  path_in_repo: dense/sft_model.pt
+  out_dir: dense/sft_outs
 ```
 
 Dolly is streamed — no dataset download. Runtime triage keeps the full
@@ -70,9 +71,10 @@ sft_outs/token_seen_vs_perplexity.png
 sft_outs/step_vs_loss.png
 ```
 
-Every 60 minutes (and on clean stop), the model and `sft_outs/` are saved. Add
-`--upload` to push them to `sddfhy546y/minillm/sft_model.pt` and
-`sddfhy546y/minillm/sft_outs/`. Upload is off by default.
+Every 60 minutes (and on clean stop), the model and `sft_outs/` are saved.
+With HF enabled they are pushed to `sddfhy546y/minillm/dense/sft_model.pt` and
+`sddfhy546y/minillm/dense/sft_outs/`, mirroring the MoE `moe/` layout. Pass
+`--no-hf` for a local-only run.
 
 ## 5. Tests
 

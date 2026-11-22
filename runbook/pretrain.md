@@ -263,9 +263,9 @@ Device: cuda:0 | GPUs used: 2
 Model parameters: 102,467,328
 batch_size=8 block_size=128 grad_accum=1 -> 1,024 tokens per optimizer step
 Checkpoint: every 60.0 min to /kaggle/working/minillm/checkpoints
-HF sync: ENABLED | repo=sddfhy546y/minillm | model=minillm_latest.pt | out=out | token_env=HF_TOKEN
+HF sync: ENABLED | repo=sddfhy546y/minillm | model=dense/minillm_latest.pt | out=dense/out | token_env=HF_TOKEN
 Local metrics/plots: /kaggle/working/minillm/out
-HF metrics/plots: sddfhy546y/minillm/out
+HF metrics/plots: sddfhy546y/minillm/dense/out
 Logging: step lines for the first 10 steps only; metrics/plot points every 100 steps; sample generation every 1000 steps.
 step 1 | tokens_seen 1,024 | loss 10.9xxx | ppl 48,xxx | lr 1.50e-06 | tok/s ...
 ...
@@ -306,8 +306,8 @@ main([])
 ```
 
 On startup the script uses `checkpoints/minillm_latest.pt` if it is present
-and valid, and only then falls back to downloading `minillm_latest.pt` from
-the HF repo. This prevents a bad remote upload from overwriting a good local
+and valid, and only then falls back to downloading `dense/minillm_latest.pt`
+from the HF repo. This prevents a bad remote upload from overwriting a good local
 checkpoint. Checkpoints containing NaN/Inf weights are rejected. It restores
 model weights, optimizer state, step, token count, RNG state, and the metrics
 history used by the plots.
@@ -336,11 +336,11 @@ out/training_curves.png
 Remote, in `sddfhy546y/minillm`:
 
 ```text
-minillm_latest.pt
-out/metrics.json
-out/token_seen_vs_loss.png
-out/token_seen_vs_perplexity.png
-out/training_curves.png
+dense/minillm_latest.pt
+dense/out/metrics.json
+dense/out/token_seen_vs_loss.png
+dense/out/token_seen_vs_perplexity.png
+dense/out/training_curves.png
 ```
 
 Checkpoints and plots are written/uploaded every 60 minutes, at normal exit,
@@ -381,7 +381,8 @@ session often dies before one hour, change `checkpoint_interval_minutes` to
 **Important:** if you change any architecture field, an existing HF
 checkpoint will fail the config-mismatch check and training will start from
 scratch. To really start fresh, also delete or rename the remote
-`minillm_latest.pt` (or change `hf.filename` in `configs/pretrain.yaml`).
+`dense/minillm_latest.pt` (or change `hf.path_in_repo` in
+`configs/pretrain.yaml`).
 
 ### Simple smaller-model recipe
 
@@ -447,7 +448,7 @@ Leave `vocab_size: 50257` and `tie_weights: true`.
 | `checkpoint_interval_minutes` | `60` | Save/upload interval in minutes. Set `10` on short Kaggle sessions. |
 | CLI: `--checkpoint-seconds` | unset | Testing override in seconds, e.g. `10`. Sets `checkpoint_interval_minutes = seconds/60`. Do not use for long runs. |
 | `checkpoint_dir` | `checkpoints` | Local checkpoint folder. |
-| `out_dir` | `out` | Local metrics/plots folder. Same name is used in HF by default. |
+| `out_dir` | `out` | Local metrics/plots folder. HF uses `hf.out_dir` (`dense/out`). |
 | `save_optimizer` | `true` | Exact resume. Set `false` for much smaller checkpoints if a fresh optimizer is acceptable. |
 
 ### Data
@@ -467,8 +468,9 @@ Leave `vocab_size: 50257` and `tie_weights: true`.
 | --- | --- | --- |
 | `hf.repo_id` | `sddfhy546y/minillm` | Target HF repo. Do not include the full URL. |
 | `hf.token_env` | `HF_TOKEN` | Environment variable name. Must match the Kaggle secret. |
-| `hf.filename` | `minillm_latest.pt` | Checkpoint filename in the repo root. |
-| `hf.out_dir` | `out` | Folder inside the HF repo for metrics/plots. |
+| `hf.filename` | `minillm_latest.pt` | Local checkpoint filename. |
+| `hf.path_in_repo` | `dense/minillm_latest.pt` | Checkpoint path inside the HF repo. |
+| `hf.out_dir` | `dense/out` | Folder inside the HF repo for metrics/plots. |
 | `hf.private` | `true` | Used when the script creates a repo. Existing repo visibility is unchanged. |
 | `hf.upload_retries` | `3` | Retries per upload on a transient Hub/network error. Auth/not-found errors are not retried. |
 | `hf.upload_retry_backoff` | `2.0` | Seconds before the first retry; the delay doubles each attempt. |
@@ -500,7 +502,7 @@ still want the checkpoint and plots uploaded to HF.
 | One GPU | CLI: `main(["--device", "cuda", "--num-gpus", "1"])` |
 | No HF upload | CLI: add `--no-hf` |
 | Fresh model, keep HF upload | CLI: add `--new` |
-| Fresh run from scratch | `--new`, or remove local `checkpoints/minillm_latest.pt` and delete/rename the HF `minillm_latest.pt` |
+| Fresh run from scratch | `--new`, or remove local `checkpoints/minillm_latest.pt` and delete/rename the HF `dense/minillm_latest.pt` |
 | Avoid CUDA OOM | Lower `batch_size` to `4`/`2`, or raise `grad_accum_steps` |
 
 After editing YAML, rerun `main([])`; no code changes are needed.
@@ -549,7 +551,7 @@ is unchanged.
 | `HF repo_id is empty` | Use `configs/pretrain.yaml` from this repo; it already contains `sddfhy546y/minillm`. |
 | `HF repo ... not found` | Check the repo id and token permissions. |
 | `CUDA out of memory` | Lower `batch_size`, lower `context_length`, or raise `grad_accum_steps`. |
-| `loss nan` / `ppl nan` | Model diverged. Pull the latest code (GPT-2 init + bad-step skipping), delete the NaN `minillm_latest.pt` locally and on HF, then restart. If it repeats, lower `learning_rate`. |
+| `loss nan` / `ppl nan` | Model diverged. Pull the latest code (GPT-2 init + bad-step skipping), delete the NaN `minillm_latest.pt` locally and `dense/minillm_latest.pt` on HF, then restart. If it repeats, lower `learning_rate`. |
 | `Refusing to save checkpoint ... non-finite` | Same as above: the trainer will not overwrite the good checkpoint with NaN weights. |
 | `sequence length ... exceeds context_length` | Ensure `data.block_size <= model.context_length`. |
 | Checkpoint config mismatch | You changed `configs/model.yaml`; start fresh or restore the old architecture. |

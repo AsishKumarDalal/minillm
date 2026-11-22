@@ -16,6 +16,10 @@ For labels ``y`` and logits ``s`` (student) / ``t`` (teacher)::
 ``alpha`` and ``temperature`` live in ``configs/distill.yaml``. Both models
 use the GPT-2 BPE vocabulary, so their logits line up token-for-token.
 
+Artifacts mirror the MoE layout: locally ``distill_checkpoints/`` and
+``distilled_outs/``; on HF ``dense/distilled_model.pt`` and
+``dense/distill_outs/`` (``--no-hf`` keeps a run local-only).
+
 Usage
 -----
 ::
@@ -220,16 +224,22 @@ def load_student_model(
         if prefer_local and local_path.exists():
             path = local_path
         else:
-            hf = {
-                "repo_id": str(student_section.get("repo_id", "")).strip(),
-                "filename": str(
-                    student_section.get("filename", "minillm_latest.pt")
-                ).strip(),
-                "token": _token_from_env(token_env),
-            }
-            if not hf["repo_id"]:
+            repo_id = str(student_section.get("repo_id", "")).strip()
+            if not repo_id:
                 raise SystemExit("student.repo_id is empty in configs/distill.yaml")
-            path = download_checkpoint(hf, checkpoint_dir)
+            path = download_checkpoint(
+                {
+                    "repo_id": repo_id,
+                    "filename": local_path.name,
+                    "path_in_repo": str(
+                        student_section.get(
+                            "filename", "dense/minillm_latest.pt"
+                        )
+                    ).strip(),
+                    "token": _token_from_env(token_env),
+                },
+                local_path.parent,
+            )
         if path is None:
             raise SystemExit(
                 "No student checkpoint found. Put it at "
@@ -325,10 +335,13 @@ def load_resume_state(
     ).strip()
 
     path: Optional[Path] = local_path if local_path.exists() else None
-    if path is None and repo_id:
+    if path is None and repo_id and bool(hf_section.get("enabled", True)):
         hf = {
             "repo_id": repo_id,
             "filename": filename,
+            "path_in_repo": str(
+                hf_section.get("path_in_repo", f"dense/{filename}")
+            ).strip(),
             "token": _token_from_env(token_env),
         }
         path = download_checkpoint(hf, checkpoint_dir)

@@ -1,0 +1,43 @@
+# Weight-space conversion config.
+# No training. Source weights are streamed from disk one tensor at a time.
+
+source:
+  # Recommended: free, ungated, Apache-2.0, same architecture as Me-LLaMA-13B.
+  # Download with: huggingface-cli download nlpie/Llama2-MedTuned-13b --local-dir /root/.cache/nlpie-13b
+  path: /root/.cache/nlpie-13b
+  tokenizer_dir: /root/.cache/nlpie-13b   # set to "" if tokenizer is not local yet
+  strip_prefix: ""                        # e.g. "language_model." if needed
+
+  hidden_size: 5120
+  intermediate_size: 13824
+  num_hidden_layers: 40
+  vocab_size: 32000
+  rope_theta: 10000.0
+  eos_token_id: 2
+  bos_token_id: 1
+  pad_token_id: 0
+
+  # Lighter alternative (edit the values above when switching):
+  # path: /root/.cache/meditron-7b-chat
+  # hidden_size: 4096
+  # intermediate_size: 11008
+  # num_hidden_layers: 32
+  # vocab_size: 32017
+
+projection:
+  # svd (recommended) | random | slice
+  method: svd
+  profile_layers: 8        # how many source layers to sample when building P/Q
+
+student:
+  vocab_size: 32000        # must equal source vocab; 32017 for 7B alternative
+  context_length: 1024
+  emb_dim: 1280
+  intermediate_size: 3456
+  n_heads: 20
+  n_layers: 21
+  dtype: float32
+
+output:
+  dir: checkpoints
+  filename: weightspace_student.pt

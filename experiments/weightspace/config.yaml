@@ -1,0 +1,19 @@
+# Student architecture for weight-space programming.
+# This is a scaled-down Llama-2 decoder, NOT the project's GPT architecture.
+# The source model's tokenizer is copied unchanged, so vocab_size must match it.
+
+vocab_size: 32000          # use 32017 for malhajar/meditron-7b-chat
+context_length: 1024
+emb_dim: 1280
+intermediate_size: 3456
+n_heads: 20                # head_dim = 1280 / 20 = 64
+n_layers: 21
+rope_theta: 10000.0
+eos_token_id: 2
+bos_token_id: 1
+pad_token_id: 0
+dtype: float32
+tie_weights: false
+
+# ~498.3M parameters:
+#   embed_tokens 41.0M + lm_head 41.0M + 21 x 19.83M blocks + final norm

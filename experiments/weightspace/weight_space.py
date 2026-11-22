@@ -122,10 +122,12 @@ def select_layers(num_source_layers: int, num_student_layers: int) -> list:
 # ---------------------------------------------------------------------------
 # Projection construction (pass 1)
 # ---------------------------------------------------------------------------
-def _orthonormal_from_cov(cov: torch.Tensor, rank: int) -> torch.Tensor:
+def _orthonormal_from_cov(cov: torch.Tensor, rank: int, niter: int = 2) -> torch.Tensor:
     """Top ``rank`` right singular vectors as a (d_in x rank) matrix."""
     cov = cov.float()
-    _, _, v = torch.svd_lowrank(cov, q=min(rank, min(cov.shape)), niter=5)
+    _, _, v = torch.svd_lowrank(
+        cov, q=min(rank, min(cov.shape)), niter=int(niter)
+    )
     return v.contiguous()
 
 
@@ -137,6 +139,7 @@ def build_projections(
     student_intermediate: int,
     method: str = "svd",
     profile_layers: int = 8,
+    svd_niter: int = 2,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Return P (D_s x D_t) and Q (I_s x I_t) with orthonormal columns."""
     method = method.lower()
@@ -183,8 +186,8 @@ def build_projections(
     if not seen_i:
         raise RuntimeError("no down_proj matrices found for intermediate projection")
 
-    P = _orthonormal_from_cov(cov_h, student_dim)
-    Q = _orthonormal_from_cov(cov_i, student_intermediate)
+    P = _orthonormal_from_cov(cov_h, student_dim, niter=svd_niter)
+    Q = _orthonormal_from_cov(cov_i, student_intermediate, niter=svd_niter)
     return P, Q
 
 
@@ -255,7 +258,8 @@ def build_student(
         d_t,
         i_t,
         method=cfg.get("projection", {}).get("method", "svd"),
-        profile_layers=int(cfg.get("projection", {}).get("profile_layers", 8)),
+        profile_layers=int(cfg.get("projection", {}).get("profile_layers", 2)),
+        svd_niter=int(cfg.get("projection", {}).get("niter", 2)),
     )
 
     layer_map_list = select_layers(n_src_layers, n_t)

@@ -27,7 +27,8 @@ source:
 projection:
   # svd (recommended) | random | slice
   method: svd
-  profile_layers: 8        # how many source layers to sample when building P/Q
+  profile_layers: 2        # how many source layers to sample when building P/Q
+  niter: 2                 # randomized SVD iterations (higher = slower/better)
 
 student:
   vocab_size: 32000        # must equal source vocab; 32017 for 7B alternative

@@ -25,6 +25,11 @@ from tool_calling.data_format import (  # noqa: E402
 from tool_calling.runtime import demo_registry  # noqa: E402
 from tool_calling.tool_calling_distill import build_registry  # noqa: E402
 from tool_calling.tool_calling_sft_data import ToolCallingSFTData  # noqa: E402
+from tool_calling.hf_dataset import (  # noqa: E402
+    StreamingToolSFTData,
+    glaive_to_examples,
+    xlam_to_examples,
+)
 
 TINY_CFG = {
     "vocab_size": 50257,
@@ -77,6 +82,45 @@ def test_registry() -> None:
     built = build_registry(specs)
     assert built.header == "foo(x)"
     print("tool registry OK")
+
+
+def test_hf_converters() -> None:
+    xlam_row = {
+        "query": "weather in Paris?",
+        "tools": json.dumps([{
+            "name": "get_weather",
+            "parameters": {"properties": {"city": {"type": "string"}}},
+        }]),
+        "answers": json.dumps([{
+            "name": "get_weather",
+            "arguments": {"city": "Paris"},
+            "response": {"temp_c": 22},
+        }]),
+    }
+    ex = xlam_to_examples(xlam_row)
+    assert len(ex) == 1
+    assert ex[0].tools == "get_weather(city)"
+    assert ex[0].call == 'CALL get_weather {"city":"Paris"}'
+
+    glaive_row = {
+        "system": 'SYSTEM: use tools\n{\n  "name": "get_weather",\n'
+                  '  "parameters": {"properties": {"city": {"type": "string"}}}\n}\n',
+        "chat": 'USER: weather in Paris?\nASSISTANT: <functioncall> '
+                '{"name": "get_weather", "arguments": \'{"city":"Paris"}\'} '
+                '<|endoftext|>\nFUNCTION RESPONSE: {"temp_c":22}\n'
+                'ASSISTANT: It is 22C. <|endoftext|>\n',
+    }
+    gex = glaive_to_examples(glaive_row)
+    assert len(gex) == 1
+    assert gex[0].call == 'CALL get_weather {"city":"Paris"}'
+    assert "22C" in gex[0].answer
+
+    stream = StreamingToolSFTData(
+        [xlam_row], dataset="xlam", block_size=64, max_docs=1
+    )
+    batch = next(stream.batches(batch_size=1, epochs=1))
+    assert batch[0].shape[0] == 1
+    print("HF xlam/glaive converters + streaming OK")
 
 
 def test_sft_and_dpo(tmpdir: str) -> None:
@@ -180,6 +224,7 @@ def test_sft_and_dpo(tmpdir: str) -> None:
 def main() -> None:
     test_format_and_parser()
     test_registry()
+    test_hf_converters()
     with tempfile.TemporaryDirectory() as tmpdir:
         test_sft_and_dpo(tmpdir)
     print("all tool-calling tiny tests passed")

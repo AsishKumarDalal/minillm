@@ -32,6 +32,9 @@ python -m sft.tuning --epochs 1 --steps 1000
 
 # Tool-calling SFT on compact tool traces (see experiments/plan/toolcalling.md):
 python -m tool_calling.tool_calling_sft --steps 500 --no-hf
+
+# Tool-calling SFT streamed from xLAM / Glaive on HuggingFace:
+python -m tool_calling.tool_calling_sft --config configs/tool_calling_sft_stream.yaml
 ```
 
 In Kaggle, follow the detailed [pretraining runbook](runbook/pretrain.md).

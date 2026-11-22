@@ -72,6 +72,8 @@ sampling + DPO, which is much cheaper and more stable at this scale.
 | `tool_calling/data_format.py` | compact protocol, OpenAI-row conversion, parser, tokenisation helper |
 | `tool_calling/runtime.py` | tool registry, parser, executor, two demo tools |
 | `tool_calling/tool_calling_sft_data.py` | JSONL → `(input_ids, labels)` with assistant-only loss |
+| `tool_calling/hf_dataset.py` | xLAM/Glaive row converters + streamed HF dataset |
+| `tool_calling/convert_hf_dataset.py` | Optional: convert streamed HF rows to a local JSONL snapshot |
 | `tool_calling/tool_calling_sft.py` | SFT trainer reusing `sft.tuning.SFTTrainer` |
 | `tool_calling/tool_calling_distill.py` | teacher generates tool traces → JSONL → student SFT |
 | `tool_calling/negative_sampling.py` | rejection sampling + DPO |
@@ -83,6 +85,7 @@ New configs:
 | `configs/tool_calling_sft.yaml` | tool SFT hyperparameters and HF paths |
 | `configs/tool_calling_distill.yaml` | teacher API, tools, prompts, dataset path |
 | `configs/negative_sampling.yaml` | sampling and DPO hyperparameters |
+| `configs/tool_calling_sft_stream.yaml` | streamed xLAM/Glaive tool SFT config |
 
 New seed data:
 
@@ -155,6 +158,45 @@ Tool schemas are flattened to `name(p1,p2)`. Tool calls become
 `tool_result=`; otherwise an empty `{}` is written.
 
 ---
+
+## 4b. Local JSONL vs streamed HF data
+
+There are two ways to feed tool SFT:
+
+1. **Local JSONL (`data.source: jsonl`)** — reads `data/tool_traces.jsonl`.
+   The four committed rows are only seeds for testing. Use
+   `tool_calling/convert_hf_dataset.py` to build a larger local snapshot:
+
+   ```bash
+   python -m tool_calling.convert_hf_dataset --dataset xlam --max-docs 2000
+   python -m tool_calling.convert_hf_dataset --dataset glaive --max-docs 2000 \
+       --output data/tool_traces_glaive.jsonl
+   ```
+
+2. **Streamed HF (`data.source: hf`)** — recommended. Rows are downloaded one
+   at a time and converted on the fly during SFT, exactly like pretraining and
+   Dolly SFT. Use `configs/tool_calling_sft_stream.yaml`:
+
+   ```bash
+   python -m tool_calling.tool_calling_sft \
+       --config configs/tool_calling_sft_stream.yaml
+   ```
+
+   Set `data.dataset: xlam` or `data.dataset: glaive`. `data.max_docs` caps the
+   stream. Use `epochs: 1` with streaming; the HF stream is consumed once.
+
+   **Note:** `Salesforce/xlam-function-calling-60k` is a gated dataset. You must
+   accept its license on HuggingFace and set `HF_TOKEN` before streaming it.
+   `glaiveai/glaive-function-calling-v2` worked without authentication in
+   testing and is the easiest default.
+
+Converters live in `tool_calling/hf_dataset.py`:
+
+- xLAM: parses `query`, `tools`, `answers` (each may be a JSON string).
+- Glaive: parses the function schemas from `system` and the multi-turn `chat`
+  field, extracting `<functioncall>` and `FUNCTION RESPONSE` turns.
+
+Both emit the same compact `ToolExample` schema as the local JSONL reader.
 
 ## 5. Phase-by-phase commands
 

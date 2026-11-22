@@ -1,0 +1,71 @@
+# Tool-calling SFT with streamed HuggingFace data.
+#
+# Either xLAM or Glaive is streamed and converted to the compact
+# TOOLS/USER/ASSISTANT/RESULT format on the fly. No full download.
+#
+#   data.dataset: xlam    -> Salesforce/xlam-function-calling-60k
+#   data.dataset: glaive  -> glaiveai/glaive-function-calling-v2
+#
+# Use epochs: 1 with streaming: the HF stream is consumed once.
+
+seed: 1337
+device: auto
+num_gpus: 2
+
+student:
+  source: local
+  local_path: sft_checkpoints/sft_model.pt
+  repo_id: sddfhy546y/minillm
+  filename: dense/sft_model.pt
+  prefer_local: true
+  token_env: HF_TOKEN
+
+model_config: configs/model.yaml
+
+epochs: 1
+steps: 2000
+batch_size: 4
+grad_accum_steps: 1
+learning_rate: 2.0e-5
+min_lr: 2.0e-6
+warmup_steps: 50
+weight_decay: 0.01
+betas: [0.9, 0.95]
+grad_clip: 1.0
+amp: true
+amp_dtype: auto
+
+log_first_steps: 10
+log_interval: 100
+sample_interval: 500
+sample_prompt: "TOOLS: weather(city)\nUSER: weather in Paris?\nASSISTANT:"
+sample_max_new_tokens: 48
+sample_temperature: 0.0
+sample_top_k: null
+
+checkpoint_interval_minutes: 60
+checkpoint_dir: tool_calling_checkpoints
+out_dir: tool_calling_sft_outs
+save_optimizer: false
+progress: true
+
+data:
+  source: hf                # hf | jsonl
+  dataset: xlam             # xlam | glaive
+  dataset_name: null        # null -> default HF repo for the dataset above
+  split: train
+  shuffle_buffer: 100       # 0 disables streaming shuffle
+  max_docs: 5000            # stop after this many HF rows (null = whole stream)
+  block_size: null
+  tokenizer_name: gpt2
+
+hf:
+  enabled: true
+  repo_id: sddfhy546y/minillm
+  token_env: HF_TOKEN
+  filename: tool_sft_model.pt
+  path_in_repo: tool_calling/tool_sft_model.pt
+  out_dir: tool_calling/sft_outs
+  private: true
+  upload_retries: 3
+  upload_retry_backoff: 2.0

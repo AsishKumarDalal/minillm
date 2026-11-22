@@ -53,6 +53,7 @@ from sft.tuning import (  # noqa: E402
     load_sft_state,
     load_student_model,
 )
+from .hf_dataset import HF_DATASET_NAMES, StreamingToolSFTData  # noqa: E402
 from .tool_calling_sft_data import ToolCallingSFTData  # noqa: E402
 
 DEFAULT_CONFIG = ROOT_DIR / "configs" / "tool_calling_sft.yaml"
@@ -95,8 +96,9 @@ def run_tool_sft(cfg: dict, new_run: bool = False, full_new: bool = False) -> No
             f"data.block_size={block_size} exceeds "
             f"context_length={model_cfg['context_length']}"
         )
+    source = str(data_cfg.get("source", "jsonl")).strip().lower()
     path = data_cfg.get("path")
-    if not path:
+    if source in ("jsonl", "local") and not path:
         raise SystemExit("tool SFT needs data.path pointing to tool_traces.jsonl")
 
     checkpoint_dir = Path(cfg.get("checkpoint_dir", "tool_calling_checkpoints"))
@@ -124,12 +126,31 @@ def run_tool_sft(cfg: dict, new_run: bool = False, full_new: bool = False) -> No
     if resume_state is not None:
         trainer.restore_state(resume_state)
 
-    data = ToolCallingSFTData.from_jsonl(
-        path,
-        block_size=block_size,
-        tokenizer_name=str(data_cfg.get("tokenizer_name", "gpt2")),
-        max_docs=data_cfg.get("max_docs"),
-    )
+    if source in ("hf", "stream", "streaming"):
+        dataset_key = str(data_cfg.get("dataset") or data_cfg.get("dataset_key") or "").lower()
+        if dataset_key not in HF_DATASET_NAMES:
+            raise SystemExit(
+                f"data.dataset must be one of {sorted(HF_DATASET_NAMES)} "
+                f"for streamed tool SFT; got {dataset_key!r}"
+            )
+        data = StreamingToolSFTData.from_hf(
+            dataset_name=str(data_cfg.get("dataset_name") or HF_DATASET_NAMES[dataset_key]),
+            dataset=dataset_key,
+            split=str(data_cfg.get("split", "train")),
+            shuffle_buffer=int(data_cfg.get("shuffle_buffer", 100)),
+            seed=int(cfg.get("seed", 1337)),
+            block_size=block_size,
+            tokenizer_name=str(data_cfg.get("tokenizer_name", "gpt2")),
+            max_docs=data_cfg.get("max_docs"),
+        )
+        logging.info("Streaming tool SFT data from HF dataset %r.", dataset_key)
+    else:
+        data = ToolCallingSFTData.from_jsonl(
+            path,
+            block_size=block_size,
+            tokenizer_name=str(data_cfg.get("tokenizer_name", "gpt2")),
+            max_docs=data_cfg.get("max_docs"),
+        )
     trainer.data_stats = data.stats
 
     epochs = int(cfg.get("epochs", 1) or 1)
